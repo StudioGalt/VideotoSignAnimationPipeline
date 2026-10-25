@@ -23,7 +23,7 @@ python create_workspace.py "D:/Sign Workspace" --yes
 
 You should see the folders it made, `Settings: D:\Sign Workspace\pipeline_config.json`, how many scripts were copied into `Scripts`, and the next steps. The workspace is where everything happens from now on: the scripts are run from its `Scripts` folder, and they find their settings by themselves.
 
-If you have the pose library (`MH_rig poses.zip`, from the Releases page), put it next to `create_workspace.py` and run the command again: the poses go into `Storage\MH_rig`.
+If you have the pose libraries (`Body_Poses_Basic poses.zip` and `Body_Poses_Advanced poses.zip`, from the Releases page), put them next to `create_workspace.py` and run the command again: the poses go into `Storage\Body_Poses_Basic` and `Storage\Body_Poses_Advanced`.
 
 ---
 
@@ -57,18 +57,35 @@ Lines you can ignore in the Output Log: *Track with name root already exists*, *
 Every Blender script below is run from the **Scripting** workspace: **Text ▸ Open…** the script from `D:\Sign Workspace\Scripts`, then **Run Script** (▶). The console (**Window ▸ Toggle System Console**) shows what each one did.
 
 1. **Build the character.** In a new, empty file, run `build_metahuman_rig.py`. It builds the MetaHuman with a control rig (`MH_rig`), its skin and hair, lights, and the **Metahuman Rig** tab in the 3D Viewport's sidebar (**N**), and saves `D:\Sign Workspace\MetaHuman\MetaHuman_character.blend`. It warns if the Character DNA add-on is off (the face then doesn't follow the face board, but everything else is built).
-2. **The neutral pose** (the pose every take starts and ends in): a default one is already in `MetaHuman\neutral_pose.json`. For your own, pose `MH_rig` in the character file and run `save_neutral_pose.py`.
+2. **The neutral pose** (the pose every take starts and ends in): a default one is already in `MetaHuman\neutral_pose.json`. For your own, pose `MH_rig` (in the character file or a take) and press **Set Neutral Pose** in the Metahuman Rig tab's Cleanup box, or run `save_neutral_pose.py`. The old pose is kept as `neutral_pose <date> <time>.json`; takes done before keep theirs.
 3. **Import a take.** In the character file, run `import_unreal_take.py`. It takes the next take from `Unreal Exports`, keys it onto `MH_rig` at 60 fps, timed to its video, and saves it as `D:\Sign Workspace\<take>\<take>.blend` (the take's exported files and video move in with it). Run it again, from the character file, for each further take.
 4. **Procedural fixes.** Open the take's `.blend`, run `metahuman_procedural_fixes.py`, and press **OK** in its dialog. It sets up the animation layers, eases the take out of and back into the neutral pose, holds the hips and legs still (**Leg Pin**), switches arms and legs to IK, and saves `<take> Working.blend`.
 5. **Clean up by hand** in `<take> Working.blend`, with the **Metahuman Rig** tab:
    - **Import Video** puts the take's video behind the character, playing in step with the timeline, to compare against.
    - **Trim Start / Trim End** cut the take; **Rest Hand** holds one hand still for one-handed signs.
-   - Poses from the Asset Browser (library `MH_rig`) apply to the rig; **Match IK to FK** puts the IK controls on them.
+   - Poses from the Asset Browser (libraries `Body_Poses_Basic` and `Body_Poses_Advanced`) apply to the rig; **Match IK to FK** puts the IK controls on them.
    - **Fix Flips** if a finger or limb spins round in a frame or two.
    - **Rename File** saves the take under its archive name: `<Product> <Language> <Name> <Date> Unedited.blend`, in a folder of that name.
+   - **Finish** box, when the cleanup is done:
+     - **Bake Layers** puts every animation layer into one action per object, keyed on every frame, frame 0's rest pose included. The layers are kept, muted; Ctrl+Z undoes it.
+     - **Export FBX** writes `<name>.fbx` (the body skeleton), `<name> Face.fbx` (the face skeleton), `<name> Face Board.json` (the face board's controls) and `<name> Export.json` (what was exported, for the way back into Unreal) next to the `.blend`, at Unreal's size. **Name** is filled in as `<take> MetaHuman`; change it as you like. **Body** and **Face** (both ticked) choose which files are written; tick **Meshes** to include the meshes.
+     - **Render** writes `<take> Render.mp4` next to the `.blend`, through the scene camera or a camera it frames on the character (upper body or whole body). It renders the scene's range; untick **Use scene range** to set **From** and **To** (the file is then `<take> Render <from>-<to>.mp4`). Blender's render window shows it going; Esc stops it.
 6. **Reference FBX** (optional, for tools that take Xsens motion): put any Xsens MVN FBX at `D:\Sign Workspace\MetaHuman\Xsens_reference.fbx` (only its skeleton is used), then run `export_reference_fbx.py` in the take file. It writes `<take> Reference.fbx` into the take's folder.
 
 That's the pipeline: each take is now a cleaned-up animation on the MetaHuman, in its own folder of the workspace.
+
+---
+
+## 5. Back into Unreal
+
+1. In each take file, press **Export FBX** (Metahuman Rig tab ▸ Finish).
+2. In Unreal, put the MetaHuman in the level (drag `BP_<name>` from `/Game/MetaHumans` into the viewport), if you want the takes on it.
+3. Run **`import_blender_takes.py`** (Tools ▸ Execute Python Script…, from `Scripts`). A window lists every take exported from Blender, newest first:
+   - type in **Search** to narrow the list; click a take, or Ctrl-click / Shift-click several (**Pick all shown** picks every take the search shows);
+   - **Import body**: the body animation, as `AS_<take>_Body` on the MetaHuman's body skeleton;
+   - **Import face**: the face board, keyed onto the MetaHuman's face control board, so RigLogic moves the face as it did in Blender (without a MetaHuman, the face skeleton's FBX is imported instead);
+   - **Add to MetaHuman**: pick the MetaHuman from the list of the ones in the level. Each take gets a Level Sequence, `LS_<take>`, with the MetaHuman playing it.
+4. Press **Import**. Everything goes into `/Game/Finished/<take>/`; the last Level Sequence opens in Sequencer. A take imported again is replaced. The Output Log (and `Logs\import_blender_takes_report.txt`) says what was done for each take.
 
 ---
 

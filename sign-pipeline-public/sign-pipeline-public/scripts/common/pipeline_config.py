@@ -67,6 +67,7 @@ DEFAULTS = {
         "project": "",                              # the .uproject (optional; for the record and create_workspace's notes)
         "wip_folder": "/Game/WIP",                  # export_animations.py looks for takes here only
         "completed_folder": "/Game/Completed",      # ... and moves the exported ones here
+        "finished_folder": "/Game/Finished",        # import_blender_takes.py puts the takes finished in Blender here
         "character_folder": "/Game/MetaHumans",     # MetaHuman Character assets are kept here
         "metahuman_blueprint": "",                  # the MetaHuman the takes are put on; "" = the one in character_folder
         "identity": "",                             # a MetaHuman Identity for every take; "" = none (each mono video take

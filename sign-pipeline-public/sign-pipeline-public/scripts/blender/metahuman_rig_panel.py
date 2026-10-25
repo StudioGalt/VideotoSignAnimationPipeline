@@ -16,10 +16,15 @@ from mathutils import Matrix, Vector
 #     last one), on every animation layer, the face board and the shape keys alike, easing into the neutral pose;
 #     Rest Hand (hold one hand and its fingers in the frame-1 pose over a range, for one-handed signs).
 #     Pose Magic: a pose asset and JSON / CSV / TXT for every timeline marker (runs pose_magic_lib.py).
+#     Set Neutral Pose: this frame's pose becomes the neutral pose (neutral_pose.json, as save_neutral_pose.py).
 #     Rename File: save as "<Product Line> <Language> <Name> <Date> Unedited.blend" in a new folder of that name.
 #     Each writes a line to "<take> Framelog.txt"
 #   - Import Video: the take's source video on an upright plane beside the character, playing in step with the
 #     timeline (at the video's own speed, whatever the scene's frame rate), to compare the animation against
+#   - Finish: Bake Layers (every animation layer of the rig and the face board keyed into one action on every
+#     frame; the layers kept, muted), Export FBX ('<name>.fbx' and '<name> Face.fbx' next to the .blend, the name
+#     filled in as '<take> MetaHuman'; Body and Face ticked): the skeletons' animation as it plays, sized for Unreal; meshes optional), Render ('<take> Render.mp4',
+#     through the scene camera or 'SGM Render Camera' framed on the character)
 #   - which bone collections are shown
 # Run once from the Text Editor. It also ticks Text > Register for itself, so the tab comes back when the
 # file is opened again (Blender asks to allow scripts to run unless Auto Run is on in the Preferences).
@@ -1332,6 +1337,672 @@ class SGM_OT_mh_switch_all(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# --- the neutral pose (what save_neutral_pose.py does) ---
+def neutral_pose_file():
+    """Where metahuman_procedural_fixes.py reads the neutral pose: paths.neutral_pose in pipeline_config.json."""
+    return workspace_path("neutral_pose")
+
+
+def ik_limbs(rig):
+    """The limbs switched (more than half) to IK on this frame."""
+    sw = rig.pose.bones.get(SWITCH_BONE)
+    return [limb for limb in limbs(rig) if sw is not None and float(sw.get(limb["switch"], 0.0)) >= 0.5]
+
+
+class SGM_OT_mh_set_neutral(bpy.types.Operator):
+    """Save the rig's pose on this frame as the neutral pose, the pose every take eases out of and back into: the
+    rotation of every FK control and the hip, into the workspace's neutral_pose.json (as save_neutral_pose.py does).
+    Takes done before keep theirs; metahuman_procedural_fixes.py uses the new one from now on"""
+    bl_idname = "sgm.mh_set_neutral"
+    bl_label = "Set Neutral Pose"
+    bl_options = {"REGISTER"}
+
+    read_ik: bpy.props.BoolProperty(name="Read IK limbs as they show", default=True,
+                                    description="A limb switched to IK is saved as the IK shows it (its FK controls "
+                                                "are matched to the IK for the reading, then put back as they were)")
+    keep_old: bpy.props.BoolProperty(name="Keep a copy of the old pose", default=True,
+                                     description="Copy the old neutral_pose.json to 'neutral_pose <date> <time>.json' "
+                                                 "beside it first")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, title="Set the neutral pose", width=440)
+
+    def draw(self, context):
+        layout = self.layout
+        rig = find_rig(context)
+        path = neutral_pose_file()
+        col = layout.column(align=True)
+        col.label(text=f"'{rig.name if rig else '?'}' on frame {context.scene.frame_current} becomes the neutral pose,",
+                  icon="ARMATURE_DATA")
+        col.label(text=f"saved as {path or '(no pipeline_config.json found)'}")
+        layout.prop(self, "read_ik")
+        layout.prop(self, "keep_old")
+        if rig is not None:
+            ik = ik_limbs(rig)
+            if ik and not self.read_ik:
+                layout.label(text=f"In IK, so saved from their FK controls: {', '.join(limb_label(l) for l in ik)}",
+                             icon="ERROR")
+
+    def execute(self, context):
+        rig = find_rig(context)
+        if rig is None:
+            self.report({"ERROR"}, "No Metahuman rig in this scene")
+            return {"CANCELLED"}
+        path = neutral_pose_file()
+        if not path:
+            self.report({"ERROR"}, "No pipeline_config.json found (run create_workspace.py): nowhere to save the pose")
+            return {"CANCELLED"}
+        try:
+            controls = set(json.loads(rig.get("sgm_control_map", "{}")).values())
+        except ValueError:
+            controls = set()
+        if not controls:
+            self.report({"ERROR"}, f"'{rig.name}' has no control map; rebuild it with build_metahuman_rig.py")
+            return {"CANCELLED"}
+        frame = context.scene.frame_current
+        matched = ik_limbs(rig) if self.read_ik else []
+        fk_names = [n for limb in matched for n in limb["fk"]]
+        before = capture(rig, fk_names)
+        try:
+            for limb in matched:
+                match_fk_to_ik(rig, limb, False, frame)
+            context.view_layer.update()
+            bones = {}
+            for name in sorted(controls):
+                pb = rig.pose.bones.get(name)
+                if pb is not None:
+                    bones[name] = [round(v, 6) for v in pb.matrix_basis.to_quaternion()]
+        finally:
+            apply(rig, before)                      # the FK controls as they were
+            context.view_layer.update()
+        kept = None
+        if self.keep_old and os.path.isfile(path):
+            stem, ext = os.path.splitext(path)
+            kept = f"{stem} {datetime.datetime.now().strftime('%Y-%m-%d %H%M%S')}{ext}"
+            n = 2
+            while os.path.exists(kept):            # two saves in the same second keep both
+                kept = f"{stem} {datetime.datetime.now().strftime('%Y-%m-%d %H%M%S')} ({n}){ext}"
+                n += 1
+            shutil.copy2(path, kept)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"rig": rig.name, "frame": frame, "saved": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                       "bones": bones}, fh, indent=1)
+        moved = sum(1 for q in bones.values() if abs(abs(q[0]) - 1.0) > 1e-4)
+        note = (f"; IK read for {', '.join(limb_label(l) for l in matched)}" if matched else "")
+        print(f"[set neutral pose] {len(bones)} controls ({moved} turned away from rest) from frame {frame} -> {path}"
+              + note + (f"; the old pose kept as {kept}" if kept else ""))
+        framelog(f"Set Neutral Pose: frame {frame} -> {path}{note}")
+        self.report({"INFO"}, f"Neutral pose saved from frame {frame}: {len(bones)} controls{note}"
+                    + (f" (old one kept as {os.path.basename(kept)})" if kept else ""))
+        return {"FINISHED"}
+
+
+# --- finish: bake the layers, export FBX, render ---
+RENDER_CAMERA = "SGM Render Camera"
+EXPORT_SCALE = 0.01      # the FBX's size: 1/100 undoes import_unreal_take.py's BODY_SCALE 100, so Unreal gets the
+                         # MetaHuman at its own size
+
+
+def take_folder_or_none(operator):
+    if not bpy.data.filepath:
+        operator.report({"ERROR"}, "Save the file first: the result goes next to it")
+        return None
+    return os.path.dirname(bpy.path.abspath(bpy.data.filepath))
+
+
+def to_object_mode():
+    if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+
+class hidden_meshes:
+    """Meshes hidden while frames are stepped through (much quicker: they needn't follow), shown again after."""
+    def __enter__(self):
+        self.hidden = [o for o in bpy.context.view_layer.objects if o.type == "MESH" and not o.hide_viewport]
+        for o in self.hidden:
+            o.hide_viewport = True
+        return self
+
+    def __exit__(self, *exc):
+        for o in self.hidden:
+            o.hide_viewport = False
+        return False
+
+
+def animated_channels(obj):
+    """{(data_path, index): group name} for every channel any of obj's actions animates: its layers and its action."""
+    found = {}
+    for act in object_actions(obj):
+        for fc in all_fcurves(act):
+            found.setdefault((fc.data_path, fc.array_index), fc.group.name if fc.group else "")
+    return found
+
+
+def channel_value(obj, path, index):
+    value = obj.path_resolve(path)
+    try:
+        return float(value[index])
+    except TypeError:                              # a single value (a custom property, say)
+        return float(value)
+
+
+def bake_layers(objects, frames, name_of):
+    """Key, on every frame, what the layers add up to on each object, into one new action per object; then the layers
+    are turned off (their tracks muted, not deleted) and that action plays. Returns [(object, action, channels)]."""
+    scene = bpy.context.scene
+    keep = scene.frame_current
+    plans = []
+    for obj in objects:
+        channels = []
+        for (path, index), group in sorted(animated_channels(obj).items()):
+            try:
+                channel_value(obj, path, index)
+                channels.append((path, index, group))
+            except (ValueError, TypeError, AttributeError, IndexError, KeyError):
+                pass                               # a channel of a bone that is gone
+        if channels:
+            plans.append((obj, channels, [[] for _ in channels]))
+    with hidden_meshes():
+        try:
+            for frame in frames:
+                scene.frame_set(frame)
+                for obj, channels, values in plans:
+                    for (path, index, _), series in zip(channels, values):
+                        series.append(channel_value(obj, path, index))
+        finally:
+            scene.frame_set(keep)
+
+    done = []
+    for obj, channels, values in plans:
+        if hasattr(obj, "als") and getattr(obj.als, "turn_on", False):
+            try:
+                obj.als.turn_on = False            # Animation Layers stops managing this object's tracks
+            except Exception as e:
+                print(f"[bake layers] couldn't turn Animation Layers off on '{obj.name}': {e}")
+        ad = obj.animation_data or obj.animation_data_create()
+        try:
+            ad.use_tweak_mode = False
+        except (AttributeError, RuntimeError):
+            pass
+        for track in ad.nla_tracks:
+            track.mute = True
+        action = bpy.data.actions.new(name_of(obj))
+        ad.action = action
+        ad.action_blend_type, ad.action_influence = "REPLACE", 1.0
+        for (path, index, group), series in zip(channels, values):
+            fc = action.fcurve_ensure_for_datablock(obj, path, index=index, group_name=group)
+            fc.keyframe_points.clear()
+            fc.keyframe_points.add(len(frames))
+            fc.keyframe_points.foreach_set("co", [x for f, v in zip(frames, series) for x in (float(f), v)])
+            fc.update()
+        action.use_fake_user = True
+        done.append((obj, action, len(channels)))
+    fix_quaternion_flips([action for _, action, _ in done])
+    return done
+
+
+def bake_start(objects, scene):
+    """The first frame to bake: the scene's start, or earlier when the layers have keys before it - frame 0, the
+    rest pose the procedural fixes and Trim Start key there (the scene itself starts on frame 1)."""
+    first = None
+    for obj in objects:
+        for act in object_actions(obj):
+            for fc in all_fcurves(act):
+                if len(fc.keyframe_points):
+                    x = fc.keyframe_points[0].co.x
+                    first = x if first is None else min(first, x)
+    if first is None or first >= scene.frame_start:
+        return scene.frame_start
+    return max(min(0, scene.frame_start), math.floor(first + 1e-6))
+
+
+class SGM_OT_mh_bake_layers(bpy.types.Operator):
+    """Bake every animation layer of the rig and the face board into one action each, keyed on every frame of the
+    scene's range - and on frame 0, the rest pose - so the take plays (and exports) as plain keys. The layers are
+    kept, muted: Ctrl+Z, or unmute them in the NLA editor and turn Animation Layers back on, to return to them"""
+    bl_idname = "sgm.mh_bake_layers"
+    bl_label = "Bake Layers"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event, title="Bake all layers into one action?",
+                                                     message="The layers are muted and kept; Ctrl+Z undoes it")
+
+    def execute(self, context):
+        rig = find_rig(context)
+        if rig is None:
+            self.report({"ERROR"}, "No Metahuman rig in this scene")
+            return {"CANCELLED"}
+        to_object_mode()
+        objects = [o for o in (rig, face_board(rig)) if o is not None and object_actions(o)]
+        if not objects:
+            self.report({"ERROR"}, "The rig has no animation to bake")
+            return {"CANCELLED"}
+        scene = context.scene
+        frames = list(range(bake_start(objects, scene), scene.frame_end + 1))
+        stamp = take_stamp()
+        done = bake_layers(objects, frames, lambda o: f"{stamp} {'Baked' if o is rig else 'Face Baked'}")
+        lines = [f"'{o.name}': {n} channels into '{a.name}'" for o, a, n in done]
+        print(f"[bake layers] frames {frames[0]}-{frames[-1]}: " + "; ".join(lines))
+        framelog(f"Bake Layers: frames {frames[0]}-{frames[-1]}; " + "; ".join(lines))
+        self.report({"INFO"}, f"Baked frames {frames[0]}-{frames[-1]}: " + "; ".join(lines))
+        return {"FINISHED"}
+
+
+def meshes_of(armature):
+    """The meshes an armature deforms."""
+    return [o for o in bpy.context.view_layer.objects if o.type == "MESH"
+            and any(m.type == "ARMATURE" and m.object is armature for m in o.modifiers)]
+
+
+def face_skeleton(rig):
+    """The face's skeleton (FACIAL_ bones; MH_face_skeleton), or None."""
+    return next((o for o in bpy.context.scene.objects if o.type == "ARMATURE" and o is not rig
+                 and any(b.name.startswith("FACIAL_") for b in o.data.bones)), None)
+
+
+def export_skeleton_fbx(path, armature, meshes, scale, unreal_root):
+    """One FBX: the armature's deform bones, animated over the scene's range as the scene plays (layers, constraints
+    and IK baked in by the exporter), with the meshes it deforms if any are given."""
+    objects = [armature] + list(meshes)
+    shown = []
+    for o in objects:                              # hidden objects can't be selected, so can't be exported
+        if not o.visible_get():
+            shown.append((o, o.hide_get(), o.hide_viewport))
+            o.hide_viewport = False
+            o.hide_set(False)
+    for o in bpy.context.view_layer.objects:
+        o.select_set(o in objects)
+    bpy.context.view_layer.objects.active = armature
+    old_name = armature.name
+    renamed = unreal_root and "Armature" not in bpy.data.objects
+    if renamed:
+        armature.name = "Armature"                 # Unreal adds no extra root bone for an armature of this name
+    try:
+        bpy.ops.export_scene.fbx(
+            filepath=path, use_selection=True, object_types={"ARMATURE", "MESH"} if meshes else {"ARMATURE"},
+            global_scale=scale, apply_unit_scale=True, apply_scale_options="FBX_SCALE_NONE",
+            use_mesh_modifiers=False,              # keeps the shape keys
+            use_armature_deform_only=True, add_leaf_bones=False,
+            bake_anim=True, bake_anim_use_all_bones=True, bake_anim_use_nla_strips=False,
+            bake_anim_use_all_actions=False, bake_anim_force_startend_keying=True, bake_anim_step=1.0,
+            bake_anim_simplify_factor=0.0, path_mode="AUTO")
+    finally:
+        if renamed:
+            armature.name = old_name
+        for o, hidden, disabled in shown:
+            o.hide_set(hidden)
+            o.hide_viewport = disabled
+
+
+FACE_BOARD_SKIP = ("CTRL_rigLogicSwitch", "CTRL_lookAtSwitch", "CTRL_faceGUIfollowHead", "CTRL_eyesAimFollowHead",
+                   "CTRL_rigLogic", "CTRL_expressions", "CTRL_faceGUI")    # switches and frames, never animated
+EXPORT_MANIFEST = " Export.json"   # '<name> Export.json': what import_blender_takes.py (in Unreal) reads
+
+
+def face_board_document(board, frames, fps):
+    """The face board's controls on every frame, as numbers: the layout export_face_board.py writes out of Unreal
+    (each control's X and Y as '<control>.X' / '<control>.Y'; the Unreal import uses Y for a slider control). The
+    take's first frame is frame 0 of the document."""
+    names = [n for n in face_controls(board) if n in board.pose.bones and not n.startswith(FACE_BOARD_SKIP)]
+    series = {f"{n}.{axis}": [] for n in names for axis in ("X", "Y")}
+    scene = bpy.context.scene
+    keep = scene.frame_current
+    with hidden_meshes():
+        try:
+            for frame in frames:
+                scene.frame_set(frame)
+                for n in names:
+                    loc = board.pose.bones[n].location
+                    series[f"{n}.X"].append(round(float(loc.x), 6))
+                    series[f"{n}.Y"].append(round(float(loc.y), 6))
+        finally:
+            scene.frame_set(keep)
+    curves = {k: v for k, v in series.items() if max(v) - min(v) > 1e-6 or abs(v[0]) > 1e-6}
+    return {"format": 1, "kind": "face_board", "source": "blender", "face_board": board.name, "frame_rate": fps,
+            "start_frame": 0, "end_frame": len(frames) - 1, "first_key": 0, "last_key": len(frames) - 1,
+            "blender_first_frame": frames[0], "curve_count": len(curves),
+            "frames": list(range(len(frames))), "curves": curves}
+
+
+def fbx_file_name(text):
+    """The name typed in, made safe as a file name: no folder, no '.fbx', no characters Windows refuses."""
+    name = os.path.basename(text.strip().replace("/", "\\").split("\\")[-1])
+    if name.lower().endswith(".fbx"):
+        name = name[:-4]
+    return re.sub(r'[<>:"|?*]', "_", name).strip(" .")
+
+
+class SGM_OT_mh_export_fbx(bpy.types.Operator):
+    """Export the take as FBX next to the .blend: the MetaHuman's body skeleton and the face's skeleton, each with the
+    animation as it plays (every layer, the IK and the constraints baked in on every frame), sized for Unreal;
+    optionally with their meshes"""
+    bl_idname = "sgm.mh_export_fbx"
+    bl_label = "Export FBX"
+    bl_options = {"REGISTER"}
+
+    file_name: bpy.props.StringProperty(name="Name", default="",
+                                   description="The file's name, without .fbx: the body is '<name>.fbx' and the face "
+                                               "'<name> Face.fbx', in the take's folder")
+    body: bpy.props.BoolProperty(name="Body", default=True,
+                                 description="Export the body skeleton (MH_rig's deform bones) as '<name>.fbx'")
+    face: bpy.props.BoolProperty(name="Face", default=True,
+                                 description="Export the face: the face board's controls as '<name> Face Board.json' "
+                                             "(what import_blender_takes.py keys onto the MetaHuman's face board in "
+                                             "Unreal) and the face's skeleton as '<name> Face.fbx'")
+    meshes: bpy.props.BoolProperty(name="Meshes", default=False,
+                                   description="Also export the meshes each skeleton deforms (off: the animation only)")
+    scale: bpy.props.FloatProperty(name="Scale", default=EXPORT_SCALE, min=0.0001, max=1000.0, precision=4,
+                                   description="0.01 undoes the x100 of the import, so Unreal gets the MetaHuman at its own size")
+    unreal_root: bpy.props.BoolProperty(name="Unreal root", default=True,
+                                        description="Name the armature 'Armature' while exporting, so Unreal adds no "
+                                                    "extra bone above 'root'")
+
+    def invoke(self, context, event):
+        self.file_name = f"{take_stamp()} MetaHuman"     # filled in afresh each time, for the file that is open
+        return context.window_manager.invoke_props_dialog(self, title="Export FBX", width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "file_name")
+        row = layout.row(align=True)
+        row.prop(self, "body", toggle=False)
+        row.prop(self, "face", toggle=False)
+        row.prop(self, "meshes", toggle=False)
+        layout.prop(self, "scale")
+        layout.prop(self, "unreal_root")
+        name = fbx_file_name(self.file_name) or "?"
+        files = (([f"{name}.fbx"] if self.body else []) + ([f"{name} Face.fbx", f"{name} Face Board.json"] if self.face
+                                                             else []))
+        files += [f"{name}{EXPORT_MANIFEST}"] if files else []
+        if files:
+            col = layout.column(align=True)
+            col.label(text="Writes:")
+            for f in files:
+                col.label(text=f, icon="FILE")
+        else:
+            layout.label(text="Tick Body, Face or both", icon="ERROR")
+        layout.label(text=f"Frames {context.scene.frame_start}-{context.scene.frame_end}, into the take's folder")
+
+    def execute(self, context):
+        folder = take_folder_or_none(self)
+        rig = find_rig(context)
+        if folder is None or rig is None:
+            if rig is None:
+                self.report({"ERROR"}, "No Metahuman rig in this scene")
+            return {"CANCELLED"}
+        if not (self.body or self.face):
+            self.report({"ERROR"}, "Nothing to export: tick Body, Face or both")
+            return {"CANCELLED"}
+        name = fbx_file_name(self.file_name) or f"{take_stamp()} MetaHuman"
+        to_object_mode()
+        active, selected = context.view_layer.objects.active, [o for o in context.view_layer.objects if o.select_get()]
+        jobs = [(os.path.join(folder, f"{name}.fbx"), rig)] if self.body else []
+        face = face_skeleton(rig) if self.face else None
+        if face is not None:
+            jobs.append((os.path.join(folder, f"{name} Face.fbx"), face))
+        elif self.face:
+            print("[export fbx] no face skeleton (an armature with FACIAL_ bones) in this scene")
+            if not jobs:
+                self.report({"ERROR"}, "This scene has no face skeleton (an armature with FACIAL_ bones) to export")
+                return {"CANCELLED"}
+        written = []
+        scene = context.scene
+        fps = scene.render.fps / scene.render.fps_base
+        frames = list(range(scene.frame_start, scene.frame_end + 1))
+        board = face_board(rig) if self.face else None
+        board_path = os.path.join(folder, f"{name} Face Board.json") if board is not None else None
+        try:
+            for path, armature in jobs:
+                meshes = meshes_of(armature) if self.meshes else []
+                export_skeleton_fbx(path, armature, meshes, self.scale, self.unreal_root)
+                written.append(path)
+                print(f"[export fbx] {path}: '{armature.name}'" + (f" with {len(meshes)} meshes" if meshes else ""))
+            if board_path:
+                document = face_board_document(board, frames, fps)
+                with open(board_path, "w", encoding="utf-8") as fh:
+                    json.dump(document, fh, separators=(",", ":"))
+                written.append(board_path)
+                print(f"[export fbx] {board_path}: {document['curve_count']} face board channels from '{board.name}'")
+            elif self.face:
+                print("[export fbx] no face board in this scene: no Face Board.json")
+        except Exception as e:
+            self.report({"ERROR"}, f"FBX export stopped: {e}")
+            return {"CANCELLED"}
+        finally:
+            for o in context.view_layer.objects:
+                o.select_set(o in selected)
+            context.view_layer.objects.active = active
+        if not written:
+            self.report({"ERROR"}, "Nothing was exported")
+            return {"CANCELLED"}
+        manifest = os.path.join(folder, f"{name}{EXPORT_MANIFEST}")
+        body_file = next((p for p, a in jobs if a is rig), None)
+        face_file = next((p for p, a in jobs if a is not rig), None)
+        with open(manifest, "w", encoding="utf-8") as fh:
+            json.dump({"format": 1, "kind": "sgm_blender_export", "name": name, "take": take_stamp(),
+                       "blend": bpy.data.filepath, "saved": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                       "frame_rate": fps, "blender_frames": [frames[0], frames[-1]], "frame_count": len(frames),
+                       "scale": self.scale,
+                       "body_fbx": os.path.basename(body_file) if body_file in written else None,
+                       "face_fbx": os.path.basename(face_file) if face_file in written else None,
+                       "face_board": os.path.basename(board_path) if board_path in written else None}, fh, indent=1)
+        written.append(manifest)
+        framelog("Export FBX: " + "; ".join(os.path.basename(p) for p in written))
+        self.report({"INFO"}, "Exported " + ", ".join(os.path.basename(p) for p in written)
+                    + ("" if face is not None or not self.face else " (no face skeleton in this scene)"))
+        return {"FINISHED"}
+
+
+def render_camera(rig, upper_body, start, end):
+    """A camera in front of the character, framed on it over frames start-end (Pose Magic's framing). Returns it."""
+    scene = bpy.context.scene
+    magic, _ = pose_magic_module()
+    span = end - start
+    frames = sorted({start + round(span * i / 11) for i in range(12)})
+    keep = scene.frame_current
+    try:
+        if magic is not None:
+            front, left, up = magic.character_axes(rig)
+            points = magic.body_points(rig, frames, upper_body)
+            if len(points):
+                return magic.place_camera(RENDER_CAMERA, points, left, up, front, margin=1.1)
+    finally:
+        scene.frame_set(keep)
+    return None
+
+
+def render_check(rig, camera, frame):
+    """(problem or None, lines for the console): does the camera see the character on this frame, and will the
+    character's meshes render?"""
+    from bpy_extras.object_utils import world_to_camera_view
+    scene = bpy.context.scene
+    magic, _ = pose_magic_module()
+    lines = [f"camera '{camera.name}' at {tuple(round(v, 1) for v in camera.matrix_world.translation)}, "
+             f"clip {camera.data.clip_start:g}-{camera.data.clip_end:g}"]
+    meshes = magic.character_objects(rig) if magic is not None else meshes_of(rig)
+    rendered = [o for o in meshes if not o.hide_render and all(not c.hide_render for c in o.users_collection)]
+    lines.append(f"character meshes: {len(meshes)}, {len(rendered)} of them rendered"
+                 + (f" (hidden from render: {', '.join(o.name for o in meshes if o not in rendered)[:200]})"
+                    if len(rendered) < len(meshes) else ""))
+    if not rendered:
+        return "None of the character's meshes is set to render (the camera icon in the Outliner)", lines
+    if magic is None:
+        return None, lines
+    keep = scene.frame_current
+    try:
+        points = magic.body_points(rig, [frame])
+    finally:
+        scene.frame_set(keep)
+    if not len(points):
+        return None, lines
+    step = max(1, len(points) // 4000)
+    inside = 0
+    for p in points[::step]:
+        v = world_to_camera_view(scene, camera, Vector(tuple(p)))
+        inside += 0.0 <= v.x <= 1.0 and 0.0 <= v.y <= 1.0 and camera.data.clip_start < v.z < camera.data.clip_end
+    share = inside / len(points[::step])
+    lo, hi = points.min(axis=0), points.max(axis=0)
+    lines.append(f"character from {tuple(round(float(v), 1) for v in lo)} to {tuple(round(float(v), 1) for v in hi)}; "
+                 f"{share:.0%} of it in the camera's view on frame {frame}")
+    if share < 0.05:
+        return f"The camera '{camera.name}' doesn't see the character (only {share:.0%} of it in view)", lines
+    return None, lines
+
+
+ENGINES = [("SCENE", "As set", "The render engine the scene is set to"),
+           ("EEVEE", "EEVEE", "Quick, with the materials, hair and lights"),
+           ("WORKBENCH", "Workbench", "Quickest: plain shading, as in the viewport's Solid mode")]
+
+
+def restore_range_after_render(scene, start, end):
+    """Put the scene's frame range back to start-end when the render finishes or is stopped."""
+    def restore(*_args):
+        for handlers in (bpy.app.handlers.render_complete, bpy.app.handlers.render_cancel):
+            while restore in handlers:
+                handlers.remove(restore)
+        try:
+            if (scene.frame_start, scene.frame_end) != (start, end):
+                scene.frame_start, scene.frame_end = start, end
+                print(f"[render] the scene's frame range is {start}-{end} again")
+        except ReferenceError:
+            pass
+    bpy.app.handlers.render_complete.append(restore)
+    bpy.app.handlers.render_cancel.append(restore)
+    return restore
+
+
+class SGM_OT_mh_render(bpy.types.Operator):
+    """Render the scene's frame range, or a range you set, to an MP4 next to the .blend ('<take> Render.mp4'), through
+    the scene camera or a camera framed on the character. Blender's render window shows it going (Esc stops it)"""
+    bl_idname = "sgm.mh_render"
+    bl_label = "Render"
+    bl_options = {"REGISTER"}
+
+    framing: bpy.props.EnumProperty(name="Camera", items=[
+        ("SCENE", "Scene camera", "The scene's own camera, where it is"),
+        ("UPPER_BODY", "Upper body", f"'{RENDER_CAMERA}', in front of the character, framed from the hips up over the whole take"),
+        ("WHOLE_BODY", "Whole body", f"'{RENDER_CAMERA}', framed on the whole body over the whole take")],
+        default="UPPER_BODY")
+    engine: bpy.props.EnumProperty(name="Engine", items=ENGINES, default="SCENE")
+    percentage: bpy.props.IntProperty(name="Size %", default=100, min=10, max=200, subtype="PERCENTAGE",
+                                      description="The render's size, as a share of the scene's resolution")
+    show_video: bpy.props.BoolProperty(name="Reference video", default=False,
+                                       description="Show the reference video's plane in the render")
+    use_scene_range: bpy.props.BoolProperty(name="Use scene range", default=True,
+                                            description="Render the scene's frame range; untick to set From and To")
+    frame_from: bpy.props.IntProperty(name="From", default=1, description="The first frame rendered")
+    frame_to: bpy.props.IntProperty(name="To", default=250, description="The last frame rendered")
+
+    def invoke(self, context, event):
+        self.use_scene_range = True
+        self.frame_from, self.frame_to = context.scene.frame_start, context.scene.frame_end
+        if context.scene.camera is not None and context.scene.camera.name != RENDER_CAMERA:
+            self.framing = "SCENE"
+        self.percentage = context.scene.render.resolution_percentage
+        return context.window_manager.invoke_props_dialog(self, title="Render the take")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "framing")
+        layout.prop(self, "engine")
+        layout.prop(self, "percentage")
+        if bpy.data.objects.get(VIDEO_OBJECT) is not None:
+            layout.prop(self, "show_video")
+        scene = context.scene
+        layout.prop(self, "use_scene_range", text=f"Use scene range ({scene.frame_start}-{scene.frame_end})")
+        if not self.use_scene_range:
+            row = layout.row(align=True)
+            row.prop(self, "frame_from")
+            row.prop(self, "frame_to")
+        start, end = self.frames(scene)
+        r = scene.render
+        col = layout.column(align=True)
+        col.label(text=f"{r.resolution_x * self.percentage // 100} x {r.resolution_y * self.percentage // 100}, "
+                       f"frames {start}-{end} ({end - start + 1})", icon="RENDER_ANIMATION")
+        col.label(text=self.file_name(scene), icon="FILE_MOVIE")
+
+    def frames(self, scene):
+        if self.use_scene_range:
+            return scene.frame_start, scene.frame_end
+        return min(self.frame_from, self.frame_to), max(self.frame_from, self.frame_to)
+
+    def file_name(self, scene):
+        if self.use_scene_range:
+            return f"{take_stamp()} Render.mp4"
+        start, end = self.frames(scene)
+        return f"{take_stamp()} Render {start}-{end}.mp4"
+
+    def execute(self, context):
+        folder = take_folder_or_none(self)
+        rig = find_rig(context)
+        if folder is None or rig is None:
+            if rig is None:
+                self.report({"ERROR"}, "No Metahuman rig in this scene")
+            return {"CANCELLED"}
+        to_object_mode()
+        scene = context.scene
+        start, end = self.frames(scene)
+        if self.framing == "SCENE":
+            if scene.camera is None:
+                self.report({"ERROR"}, "The scene has no camera: choose Upper body or Whole body")
+                return {"CANCELLED"}
+        else:
+            camera = render_camera(rig, self.framing == "UPPER_BODY", start, end)
+            if camera is None:
+                self.report({"ERROR"}, "Couldn't frame a camera (pose_magic_lib.py not found in Scripts)")
+                return {"CANCELLED"}
+            scene.camera = camera
+        if self.engine != "SCENE":
+            names = ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT") if self.engine == "EEVEE" else ("BLENDER_WORKBENCH",)
+            for name in names:
+                try:
+                    scene.render.engine = name
+                    break
+                except TypeError:
+                    continue
+        video = bpy.data.objects.get(VIDEO_OBJECT)
+        if video is not None:
+            video.hide_render = not self.show_video
+        board = face_board(rig)                    # the face board's frame and labels stay out of the picture
+        for o in ([board] + list(board.children_recursive)) if board is not None else []:
+            o.hide_render = True
+        check = scene.frame_current if start <= scene.frame_current <= end else start
+        problem, lines = render_check(rig, scene.camera, check)
+        for line in lines:
+            print(f"[render] {line}")
+        if problem:
+            self.report({"ERROR"}, problem + " - nothing rendered; the console has the details")
+            return {"CANCELLED"}
+        r = scene.render
+        r.resolution_percentage = self.percentage
+        settings = r.image_settings
+        if hasattr(settings, "media_type"):        # Blender 5: images and videos are chosen apart
+            settings.media_type = "VIDEO"
+        settings.file_format = "FFMPEG"
+        r.ffmpeg.format, r.ffmpeg.codec = "MPEG4", "H264"
+        r.ffmpeg.constant_rate_factor = "HIGH"
+        r.ffmpeg.audio_codec = "NONE"
+        r.use_file_extension = True
+        r.filepath = os.path.join(folder, self.file_name(scene))
+        print(f"[render] {r.filepath}: frames {start}-{end}, camera '{scene.camera.name}', {r.engine}")
+        framelog(f"Render: {os.path.basename(r.filepath)}, frames {start}-{end}")
+        restore = None
+        if (start, end) != (scene.frame_start, scene.frame_end):
+            restore = restore_range_after_render(scene, scene.frame_start, scene.frame_end)
+            scene.frame_start, scene.frame_end = start, end     # put back when the render finishes or is stopped
+        try:
+            bpy.ops.render.render("INVOKE_DEFAULT", animation=True)
+        except Exception:
+            if restore is not None:
+                restore()
+            raise
+        if restore is not None and not bpy.app.is_job_running("RENDER"):
+            restore()                                  # it rendered there and then (or didn't start)
+        return {"FINISHED"}
+
+
 # --- settings and panel ---
 class SGM_MHRigSettings(bpy.types.PropertyGroup):
     frames: bpy.props.EnumProperty(name="Frames", items=[
@@ -1417,6 +2088,14 @@ class SGM_PT_mh_rig(bpy.types.Panel):
             box.label(text="Auto-keying is on: mirrored bones are keyed", icon="REC")
 
         box = layout.box()
+        box.label(text="Show")
+        grid = box.grid_flow(columns=2, align=True)
+        for name in COLLECTIONS:
+            coll = rig.data.collections_all.get(name)
+            if coll is not None:
+                grid.prop(coll, "is_visible", text=name, toggle=True)
+
+        box = layout.box()
         box.label(text="Cleanup")
         row = box.row(align=True)
         row.operator("sgm.mh_trim_start", text="Trim Start", icon="TRIA_LEFT_BAR")
@@ -1425,7 +2104,9 @@ class SGM_PT_mh_rig(bpy.types.Panel):
         row.operator("sgm.mh_rest_hand", text="Rest Hand", icon="HAND")
         row.operator("sgm.mh_fix_flips", text="Fix Flips", icon="MOD_SMOOTH")
         box.operator("sgm.mh_rename_take", text="Rename File", icon="FILE_TICK")
-        box.operator("sgm.mh_pose_magic", text="Pose Magic", icon="ASSET_MANAGER")
+        row = box.row(align=True)
+        row.operator("sgm.mh_pose_magic", text="Pose Magic", icon="ASSET_MANAGER")
+        row.operator("sgm.mh_set_neutral", text="Set Neutral Pose", icon="ARMATURE_DATA")
 
         box = layout.box()
         box.label(text="Video")
@@ -1444,18 +2125,18 @@ class SGM_PT_mh_rig(bpy.types.Panel):
                 row.prop(video, '["sgm_video_start"]', text="Starts at")
 
         box = layout.box()
-        box.label(text="Show")
-        grid = box.grid_flow(columns=2, align=True)
-        for name in COLLECTIONS:
-            coll = rig.data.collections_all.get(name)
-            if coll is not None:
-                grid.prop(coll, "is_visible", text=name, toggle=True)
+        box.label(text="Finish")
+        box.operator("sgm.mh_bake_layers", text="Bake Layers", icon="NLA")
+        row = box.row(align=True)
+        row.operator("sgm.mh_export_fbx", text="Export FBX", icon="EXPORT")
+        row.operator("sgm.mh_render", text="Render", icon="RENDER_ANIMATION")
+
 
 
 CLASSES = (SGM_MHRigSettings, SGM_OT_mh_match, SGM_OT_mh_switch_all, SGM_OT_mh_copy_pose, SGM_OT_mh_paste_mirrored,
            SGM_OT_mh_mirror_side, SGM_OT_mh_trim_start, SGM_OT_mh_trim_end, SGM_OT_mh_rest_hand,
            SGM_OT_mh_rename_take, SGM_OT_mh_pose_magic, SGM_OT_mh_import_video, SGM_OT_mh_remove_video,
-           SGM_OT_mh_fix_flips,
+           SGM_OT_mh_fix_flips, SGM_OT_mh_bake_layers, SGM_OT_mh_export_fbx, SGM_OT_mh_set_neutral, SGM_OT_mh_render,
            SGM_OT_clear_console, SGM_PT_mh_rig)
 
 

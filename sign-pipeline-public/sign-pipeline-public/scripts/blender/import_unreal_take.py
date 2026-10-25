@@ -17,7 +17,7 @@ from mathutils import Euler, Quaternion
 #MetaHuman rig's controls, and the take is saved as OUTPUT_ROOT\<take>\<take>.blend for the procedural
 #edits (metahuman_procedural_fixes.py). (Run in an avatar file with Galtis-style control bones instead, it
 #retargets straight onto that rig.)
-VERSION = "2026-10-18"   # printed first, so the console shows which copy of this script ran
+VERSION = "2026-10-24"   # printed first, so the console shows which copy of this script ran
 # --- config ---
 # Settings left as None come from pipeline_config.json in the workspace (create_workspace.py makes it).
 OUTPUT_ROOT = None   # each finished take goes to OUTPUT_ROOT\<take name>\. None = paths.takes (the workspace folder)
@@ -504,7 +504,20 @@ def resolve_take():
     if REDO_TAKE and REDO_TAKE not in [take[0] for take in takes]:
         raise RuntimeError(f"REDO_TAKE: no exported files for '{REDO_TAKE}' in {EXPORT_ROOT} or {OUTPUT_ROOT}")
     if not takes:
-        raise RuntimeError(f"No take folders with a *_body.fbx in {EXPORT_ROOT}")
+        print(f"  nothing to import in {EXPORT_ROOT}:")
+        entries = sorted(os.listdir(EXPORT_ROOT))
+        for entry in entries[:20]:
+            path = os.path.join(EXPORT_ROOT, entry)
+            inside = sorted(os.listdir(path)) if os.path.isdir(path) else None
+            print(f"    {entry}" + ("" if inside is None else
+                  f"\\  ({', '.join(inside[:6]) + (' ...' if len(inside) > 6 else '') if inside else 'empty'})"))
+        if not entries:
+            print("    (the folder is empty)")
+        print("  export_animations.py (in Unreal) writes a folder per take here, with <take>_body.fbx in it. If it ran,")
+        print("  its Output Log says where it wrote: <project>\\Saved\\AnimationExports means it didn't find the")
+        print("  workspace's settings - run create_workspace.py again, then export_animations.py from the workspace's Scripts.")
+        raise RuntimeError(f"No take folders with a *_body.fbx in {EXPORT_ROOT}: run export_animations.py in Unreal first "
+                           "(the console lists what is in the folder)")
     blend = bpy.data.filepath
     name = os.path.splitext(os.path.basename(blend))[0] if blend else None
     for wanted in (REDO_TAKE, name):

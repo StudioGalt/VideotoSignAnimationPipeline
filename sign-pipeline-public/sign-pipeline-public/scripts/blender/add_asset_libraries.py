@@ -4,7 +4,7 @@ import os
 import sys
 
 # Add the workspace's pose libraries to Blender's asset libraries (Preferences > File Paths > Asset Libraries): each
-# folder in Storage (Galtis, MH_rig, Manny_A, Manny_T, metarig_T, Mixamo ...) under its own name. Pose Magic and
+# folder in Storage (Galtis, Body_Poses_Basic, Body_Poses_Advanced, Manny_A, Manny_T, metarig_T, Mixamo ...) under its own name. Pose Magic and
 # Process Rigs.py save their poses into the library of that name, and the Asset Browser shows them from there.
 #
 # Run it once in any file (build_metahuman_rig.py runs it too). A library that already has the name is left as it

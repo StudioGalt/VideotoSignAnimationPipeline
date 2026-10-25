@@ -51,7 +51,7 @@ UNREAL_MATERIALS_SCRIPT = "apply_unreal_materials.py"   # then Unreal's textures
 FACE_BOARD_SCRIPT = "fit_face_board.py"   # sizes the DNA add-on's face board and puts it beside the head
 LIGHTS_SCRIPT = "add_lights.py"         # sun lights and a grey world for Rendered shading, run from next to this script
 PANEL_SCRIPT = "metahuman_rig_panel.py"   # the "Metahuman Rig" sidebar tab, put in the file from next to this script
-POSE_LIBRARY = "MH_rig"   # Storage/<this> (the rig's poses: converted ones, or a shared pose pack) - with every other
+POSE_LIBRARY = ("Body_Poses_Basic", "Body_Poses_Advanced", "Face_Poses")   # Storage/<this> (the rig's poses: converted ones, or a shared pose pack) - with every other
                           # Storage folder (add_asset_libraries.py, next to this script) - is added to the Asset
                           # Browser's libraries under its name; "" = leave the Preferences alone
 LIBRARIES_SCRIPT = "add_asset_libraries.py"
@@ -1001,13 +1001,15 @@ def add_lights():
 
 
 def add_pose_library():
-    """Add the Storage folders (Storage/<POSE_LIBRARY>, Galtis, Manny_A ...) to the Preferences' asset libraries
+    """Add the Storage folders (Storage/<each of POSE_LIBRARY>, Galtis, Manny_A ...) to the Preferences' asset libraries
     (once), so their poses show in the Asset Browser and Pose Magic finds its libraries by name."""
     storage = workspace_path("storage", "")
-    if not POSE_LIBRARY or not storage:
+    names = [POSE_LIBRARY] if isinstance(POSE_LIBRARY, str) else list(POSE_LIBRARY or ())
+    names = [n for n in names if n]
+    if not names or not storage:
         return
-    folder = os.path.join(storage, POSE_LIBRARY)
-    os.makedirs(folder, exist_ok=True)
+    for name in names:
+        os.makedirs(os.path.join(storage, name), exist_ok=True)
     script = next((os.path.join(f, LIBRARIES_SCRIPT) for f in script_folders()
                    if os.path.isfile(os.path.join(f, LIBRARIES_SCRIPT))), None)
     if script:
@@ -1017,18 +1019,20 @@ def add_pose_library():
         scope["add_asset_libraries"](storage)
         return
     libraries = bpy.context.preferences.filepaths.asset_libraries
-    wanted = os.path.normcase(os.path.abspath(folder))
-    for lib in libraries:
-        if os.path.normcase(os.path.abspath(bpy.path.abspath(lib.path))) == wanted:
-            print(f"  pose library: '{lib.name}' ({folder})")
-            return
-    try:
-        bpy.ops.preferences.asset_library_add(directory=folder + os.sep)
-        libraries[-1].name = POSE_LIBRARY
-        print(f"  pose library: added '{POSE_LIBRARY}' ({folder}) to the Asset Browser's libraries "
-              "(kept when Blender closes if Auto-Save Preferences is on)")
-    except Exception as err:
-        print(f"  pose library: couldn't add {folder} ({err}) - add it in Edit > Preferences > File Paths > Asset Libraries")
+    for name in names:
+        folder = os.path.join(storage, name)
+        wanted = os.path.normcase(os.path.abspath(folder))
+        known = next((lib for lib in libraries if os.path.normcase(os.path.abspath(bpy.path.abspath(lib.path))) == wanted), None)
+        if known is not None:
+            print(f"  pose library: '{known.name}' ({folder})")
+            continue
+        try:
+            bpy.ops.preferences.asset_library_add(directory=folder + os.sep)
+            libraries[-1].name = name
+            print(f"  pose library: added '{name}' ({folder}) to the Asset Browser's libraries "
+                  "(kept when Blender closes if Auto-Save Preferences is on)")
+        except Exception as err:
+            print(f"  pose library: couldn't add {folder} ({err}) - add it in Edit > Preferences > File Paths > Asset Libraries")
 
 
 add_panel()

@@ -18,7 +18,7 @@ It:
 
 Run it again at any time: it adds missing folders and updates the scripts, and your settings stay.
 
-Pose packs (made with pack_pose_library.py, e.g. "MH_rig poses.zip" from the project's Releases page) go into
+Pose packs (made with pack_pose_library.py, e.g. "Body_Poses_Basic poses.zip" from the project's Releases page) go into
 <workspace>/Storage/<library>: give the zip with --poses, or put it next to this script. Poses already there are
 left alone, so a newer pack only adds what is new.
 
@@ -59,11 +59,11 @@ SKIP_FILES = ("README.md",)
 # (AvatarFolder, Reference Rigs, Ready for Upload and its pose libraries) aren't made.
 HAS_PHASE3 = os.path.isfile(os.path.join(HERE, "scripts", "blender", "galtis_import_reference.py"))
 PHASE3_FOLDERS = ("avatar", "reference_rigs", "ready_for_upload")
-STORAGE_FOLDERS = ["Galtis", "MH_rig", "Animation", "Mixamo", "SOMA", "Reze_T", "Manny_A", "Manny_T", "Quinn_A", "Quinn_T",
+STORAGE_FOLDERS = ["Galtis", "Body_Poses_Basic", "Body_Poses_Advanced", "Face_Poses", "Animation", "Mixamo", "SOMA", "Reze_T", "Manny_A", "Manny_T", "Quinn_A", "Quinn_T",
                    "MetaHuman_A", "MetaHuman_T", "metarig_A", "metarig_T", "metarig_Gen_A", "metarig_Gen_T"]
 
 if not HAS_PHASE3:
-    STORAGE_FOLDERS = ["MH_rig"]
+    STORAGE_FOLDERS = ["Body_Poses_Basic", "Body_Poses_Advanced", "Face_Poses"]
 
 
 def workspace_folders():
@@ -173,7 +173,7 @@ def install_poses(pack, storage):
         zf = zipfile.ZipFile(pack)
         names = [n for n in zf.namelist() if not n.endswith("/")]
         tops = {n.split("/", 1)[0] for n in names}
-        if len(tops) == 1 and all("/" in n for n in names):     # "MH_rig/<files>": the library's folder
+        if len(tops) == 1 and all("/" in n for n in names):     # "Body_Poses/<files>": the library's folder
             library = tops.pop()
             members = [(n, n.split("/", 1)[1]) for n in names]
         else:                                                     # loose files: named after the zip
@@ -295,6 +295,8 @@ def main():
         print(f"  (noted in {pc.POINTER_FILE}: the scripts find these settings from anywhere on this computer)")
     if copied:
         print(f"Scripts copied / updated in {scripts}: {len(copied)}")
+    elif not args.no_copy:
+        print(f"Scripts in {scripts}: already up to date")
     if backed_up:
         print("Your changed copies were kept as .bak first: " + ", ".join(backed_up))
     if clashes:
