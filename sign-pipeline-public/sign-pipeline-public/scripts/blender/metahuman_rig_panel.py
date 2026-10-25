@@ -25,7 +25,8 @@ from mathutils import Matrix, Vector
 #     frame; the layers kept, muted), Export FBX ('<name>.fbx' and '<name> Face.fbx' next to the .blend, the name
 #     filled in as '<take> MetaHuman'; Body and Face ticked): the skeletons' animation as it plays, sized for Unreal; meshes optional), Render ('<take> Render.mp4',
 #     through the scene camera or 'SGM Render Camera' framed on the character)
-#   - which bone collections are shown
+#   - which bone collections are shown, and Live Face: RigLogic moves the face whenever the face board changes
+#     (through the Character DNA add-on's force_evaluate, for a DNA head whose rig instance doesn't do it by itself)
 # Run once from the Text Editor. It also ticks Text > Register for itself, so the tab comes back when the
 # file is opened again (Blender asks to allow scripts to run unless Auto Run is on in the Preferences).
 # build_metahuman_rig.py puts it in the character file, and every take filed from that file has it too.
@@ -487,6 +488,9 @@ class SGM_OT_mh_trim_start(bpy.types.Operator):
     frame: bpy.props.IntProperty(name="Cut point", min=1, description="This frame becomes frame 0; the frames before it are dropped")
     ease: bpy.props.IntProperty(name="Ease In", default=EASE, min=1,
                                 description="Frames over which the take eases out of the neutral pose on frame 1")
+    video: bpy.props.BoolProperty(name="Cut the reference video too", default=True,
+                                  description="The reference video moves with the take and starts at the cut "
+                                              "(Save Trimmed Video, in the Video box, writes the cut video as a file)")
 
     @classmethod
     def poll(cls, context):
@@ -507,6 +511,7 @@ class SGM_OT_mh_trim_start(bpy.types.Operator):
         names, face = control_names(rig), face_board(rig)
         actions = scene_actions()
         moved, cut = shift_and_cut(actions, offset, keep_from=0)
+        video_note = trim_video(start_cut=offset) if self.video else ""
         for marker in scene.timeline_markers:
             marker.frame -= offset
             marker.name = f"F_{marker.frame}"
@@ -546,7 +551,7 @@ class SGM_OT_mh_trim_start(bpy.types.Operator):
         scene.frame_set(1)
         report = (f"Trim start: cut at frame {offset}. Range {old_start}-{old_end} -> {scene.frame_start}-{new_end} "
                   f"({new_end - scene.frame_start + 1} frames). {moved} keys moved, {cut} dropped, {len(actions)} actions, "
-                  f"{count} layer(s){face_note}.")
+                  f"{count} layer(s){face_note}{video_note}.")
         print(report)
         log = framelog(report)
         self.report({"INFO"}, report + (f" Logged in {os.path.basename(log)}." if log else ""))
@@ -563,6 +568,9 @@ class SGM_OT_mh_trim_end(bpy.types.Operator):
     frame: bpy.props.IntProperty(name="New last frame", min=2)
     ease: bpy.props.IntProperty(name="Ease Out", default=EASE, min=1,
                                 description="Frames over which the take eases into the neutral pose at the end")
+    video: bpy.props.BoolProperty(name="Cut the reference video too", default=True,
+                                  description="The reference video ends at the new last frame (Save Trimmed Video, in "
+                                              "the Video box, writes the cut video as a file)")
 
     @classmethod
     def poll(cls, context):
@@ -610,8 +618,10 @@ class SGM_OT_mh_trim_end(bpy.types.Operator):
             rest(face, controls)
             key(face, controls, end)
             into_pose_mode(rig)
+        video_note = trim_video(end_cut=end) if self.video else ""
         report = (f"Trim end: range {scene.frame_start}-{old_end} -> {scene.frame_start}-{end} "
-                  f"({end - old_end:+d} frames). {cut} keys dropped; eases into the neutral pose from frame {end - self.ease}.")
+                  f"({end - old_end:+d} frames). {cut} keys dropped; eases into the neutral pose from frame {end - self.ease}"
+                  f"{video_note}.")
         print(report)
         log = framelog(report)
         self.report({"INFO"}, report + (f" Logged in {os.path.basename(log)}." if log else ""))
@@ -853,7 +863,10 @@ def set_video_driver(obj):
     fcurve = obj.driver_add(path)
     driver = fcurve.driver
     driver.type = "SCRIPTED"
-    for name, prop in (("start", "sgm_video_start"), ("rate", "sgm_video_rate"), ("frames", "sgm_video_frames")):
+    obj["sgm_video_in"] = int(obj.get("sgm_video_in", 1))                       # the video's first and last frame
+    obj["sgm_video_out"] = int(obj.get("sgm_video_out", obj.get("sgm_video_frames", 1)))   # shown (the trims set them)
+    for name, prop in (("start", "sgm_video_start"), ("rate", "sgm_video_rate"), ("vin", "sgm_video_in"),
+                       ("vout", "sgm_video_out")):
         var = driver.variables.new()
         var.name, var.type = name, "SINGLE_PROP"
         var.targets[0].id_type = "OBJECT"
@@ -861,9 +874,32 @@ def set_video_driver(obj):
         var.targets[0].data_path = f'["{prop}"]'
     # Blender shows image frame min(max(frame - frame_start + 1, 0), frame_duration) + offset (the offset is added
     # after that clamp). frame_start is 1 and frame_duration far beyond the take, so the clamp is max(frame, 0);
-    # wanted: the video's frame round((frame - start) * rate) + 1, held at its first and last frame outside it.
+    # wanted: the video's frame round((frame - start) * rate) + 1, held at its in and out point (its first and last
+    # frame, or where the trims cut it) outside them.
     # (A simple expression - min, max, floor - so it runs without Auto Run Python Scripts.)
-    driver.expression = "min(max(floor((frame - start) * rate + 0.5) + 1, 1), frames) - max(frame, 0)"
+    driver.expression = "min(max(floor((frame - start) * rate + 0.5) + 1, vin), vout) - max(frame, 0)"
+
+
+def video_frame_at(obj, frame):
+    """The video's frame the plane shows on a timeline frame (before the in / out points are applied)."""
+    return int(math.floor((frame - obj["sgm_video_start"]) * obj["sgm_video_rate"] + 0.5) + 1)
+
+
+def trim_video(start_cut=None, end_cut=None):
+    """Cut the reference video with the take: Trim Start at `start_cut` (that frame becomes frame 0, so the video
+    moves as many frames earlier and starts there), Trim End at `end_cut` (the video ends there). Returns a note."""
+    obj = bpy.data.objects.get(VIDEO_OBJECT)
+    if obj is None or "sgm_video_start" not in obj.keys():
+        return ""
+    set_video_driver(obj)                          # an older plane gets its in / out points
+    frames = int(obj.get("sgm_video_frames", obj["sgm_video_out"]))
+    if start_cut is not None:
+        obj["sgm_video_in"] = max(int(obj["sgm_video_in"]), min(frames, video_frame_at(obj, start_cut)))
+        obj["sgm_video_start"] = int(obj["sgm_video_start"]) - int(start_cut)
+    if end_cut is not None:
+        obj["sgm_video_out"] = max(int(obj["sgm_video_in"]), min(int(obj["sgm_video_out"]), video_frame_at(obj, end_cut)))
+    obj.update_tag()
+    return f"; video cut to its frames {obj['sgm_video_in']}-{obj['sgm_video_out']}"
     for modifier in list(fcurve.modifiers):
         fcurve.modifiers.remove(modifier)
 
@@ -973,6 +1009,7 @@ class SGM_OT_mh_import_video(bpy.types.Operator):
         obj["sgm_video_start"] = int(self.start_frame)
         obj["sgm_video_rate"] = fps / scene_fps
         obj["sgm_video_frames"] = int(frames)
+        obj["sgm_video_in"], obj["sgm_video_out"] = 1, int(frames)      # the whole video, until a trim cuts it
         obj["sgm_video_path"] = path
         set_video_driver(obj)
         context.view_layer.update()
@@ -984,6 +1021,62 @@ class SGM_OT_mh_import_video(bpy.types.Operator):
                               f"{self.start_frame} to {last}")
         print(f"[video] {path} -> '{obj.name}': {fps:.3f} fps (scene {scene_fps:g}), {frames} frames, "
               f"{width}x{height}; timeline frames {self.start_frame}-{last}")
+        return {"FINISHED"}
+
+
+class SGM_OT_mh_save_trimmed_video(bpy.types.Operator):
+    """Write the reference video as the trims cut it (its in to out point) to '<video> Trimmed.mp4' in the take's
+    folder, at the video's own frame rate and size"""
+    bl_idname = "sgm.mh_save_trimmed_video"
+    bl_label = "Save Trimmed Video"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        obj = bpy.data.objects.get(VIDEO_OBJECT)
+        source = bpy.path.abspath(obj.get("sgm_video_path", "")) if obj is not None else ""
+        if not source or not os.path.isfile(source):
+            self.report({"ERROR"}, "No reference video (Import Video first), or its file isn't there any more")
+            return {"CANCELLED"}
+        folder = os.path.dirname(bpy.path.abspath(bpy.data.filepath)) if bpy.data.filepath else os.path.dirname(source)
+        stem = os.path.splitext(os.path.basename(source))[0]
+        stem = stem[:-len(" Trimmed")] if stem.endswith(" Trimmed") else stem
+        target = os.path.join(folder, f"{stem} Trimmed.mp4")
+        if os.path.normcase(os.path.abspath(target)) == os.path.normcase(os.path.abspath(source)):
+            self.report({"ERROR"}, "The video is already the trimmed one: it would be written over itself")
+            return {"CANCELLED"}
+        first, last = int(obj.get("sgm_video_in", 1)), int(obj.get("sgm_video_out", obj.get("sgm_video_frames", 1)))
+        clip = bpy.data.movieclips.load(source)
+        fps, (width, height) = clip.fps or 30.0, tuple(clip.size)
+        bpy.data.movieclips.remove(clip)
+        cut = bpy.data.scenes.new("SGM video cut")
+        try:
+            editor = cut.sequence_editor_create()
+            strips = editor.strips if hasattr(editor, "strips") else editor.sequences     # (renamed in Blender 4.4)
+            strips.new_movie("video", source, 1, 1)
+            whole = round(fps)
+            cut.render.fps, cut.render.fps_base = (whole, 1.0) if abs(fps - whole) < 1e-3 else (round(fps * 1001 / 1000), 1.001)
+            cut.frame_start, cut.frame_end = first, last
+            r = cut.render
+            r.resolution_x, r.resolution_y, r.resolution_percentage = width or 1920, height or 1080, 100
+            settings = r.image_settings
+            if hasattr(settings, "media_type"):
+                settings.media_type = "VIDEO"
+            settings.file_format = "FFMPEG"
+            r.ffmpeg.format, r.ffmpeg.codec, r.ffmpeg.constant_rate_factor = "MPEG4", "H264", "HIGH"
+            r.ffmpeg.audio_codec = "NONE"
+            r.use_file_extension = True
+            r.use_sequencer = True
+            r.filepath = target
+            bpy.ops.render.render(animation=True, scene=cut.name)
+        except Exception as err:
+            self.report({"ERROR"}, f"The video wasn't written: {err}")
+            return {"CANCELLED"}
+        finally:
+            bpy.data.scenes.remove(cut)
+        note = f"{os.path.basename(target)}: frames {first}-{last} of {os.path.basename(source)} ({fps:g} fps)"
+        print(f"[video] {target}: {note}")
+        framelog(f"Save Trimmed Video: {note}")
+        self.report({"INFO"}, f"Wrote {note}")
         return {"FINISHED"}
 
 
@@ -2003,6 +2096,82 @@ class SGM_OT_mh_render(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# --- live face: RigLogic follows the face board ---
+# The Character DNA add-on runs RigLogic (face board -> face) on its own only when its rig instance is fully set up
+# (with a body DNA too). Without that the face board moves but the face doesn't; its force_evaluate still works. With
+# Live Face on, the tab asks for it whenever the face board's controls change: when a control is moved, a face pose is
+# applied, or a frame of the take is played.
+LIVE_FACE_OPS = ("character_dna_pro.force_evaluate", "character_dna.force_evaluate")
+_live = {"busy": False, "last": None, "board": "", "warned": False}
+
+
+def board_state(board):
+    return tuple(round(v, 5) for pb in board.pose.bones if pb.name.startswith("CTRL_") for v in pb.location)
+
+
+def evaluate_face(board):
+    """Ask the Character DNA add-on to run RigLogic now, with the face board active. True when it ran."""
+    wm = bpy.context.window_manager
+    window = next(iter(wm.windows), None) if wm else None
+    area = next((a for a in window.screen.areas if a.type == "VIEW_3D"), None) if window else None
+    region = next((r for r in area.regions if r.type == "WINDOW"), None) if area else None
+    override = {k: v for k, v in (("window", window), ("area", area), ("region", region)) if v is not None}
+    override.update(active_object=board, object=board, selected_objects=[board])
+    for idname in LIVE_FACE_OPS:
+        mod, name = idname.split(".")
+        op = getattr(getattr(bpy.ops, mod, None), name, None)
+        if op is None:
+            continue
+        try:
+            with bpy.context.temp_override(**override):
+                if op.poll() and "FINISHED" in op():
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+@bpy.app.handlers.persistent
+def sgm_live_face(scene, depsgraph=None):
+    if _live["busy"]:
+        return
+    settings = getattr(scene, "sgm_mh_rig", None)
+    if settings is None or not settings.live_face:
+        return
+    board = scene.objects.get(_live["board"]) if _live["board"] else None
+    if board is None:
+        rig = next((o for o in scene.objects if o.type == "ARMATURE" and o.get("sgm_rig") == "metahuman"), None)
+        board = face_board(rig) if rig is not None else None
+        if board is None:
+            return
+        _live["board"] = board.name
+    state = board_state(board)
+    if state == _live["last"]:
+        return
+    _live["last"] = state
+    _live["busy"] = True
+    try:
+        if not evaluate_face(board) and not _live["warned"]:
+            _live["warned"] = True
+            print("[metahuman_rig_panel] Live Face: the Character DNA add-on's force_evaluate didn't run (is the add-on "
+                  "enabled, and the DNA head in this file?)")
+    finally:
+        _live["busy"] = False
+
+
+def live_face_changed(settings, context):
+    _live["last"] = None
+    if settings.live_face:
+        sgm_live_face(context.scene)
+
+
+def add_live_face_handlers():
+    for handlers in (bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.frame_change_post):
+        for fn in [f for f in handlers if getattr(f, "__name__", "") == "sgm_live_face"]:
+            handlers.remove(fn)
+        handlers.append(sgm_live_face)
+
+
 # --- settings and panel ---
 class SGM_MHRigSettings(bpy.types.PropertyGroup):
     frames: bpy.props.EnumProperty(name="Frames", items=[
@@ -2017,6 +2186,10 @@ class SGM_MHRigSettings(bpy.types.PropertyGroup):
                                          description="After Match IK to FK, set the limb to IK; after Match FK to IK, set it to FK")
     mirror_selected: bpy.props.BoolProperty(name="Selected only", default=False,
                                             description="Left to Right / Right to Left mirror only the selected bones")
+    live_face: bpy.props.BoolProperty(name="Live Face", default=True, update=live_face_changed,
+                                      description="Have RigLogic move the face whenever the face board changes (moving a "
+                                                  "control, applying a face pose, playing the take), through the "
+                                                  "Character DNA add-on's force_evaluate")
     key_switch: bpy.props.BoolProperty(name="Key the switch", default=False,
                                        description="Insert a key on the switch when it is changed from this panel")
     video_place: bpy.props.EnumProperty(name="Place", items=VIDEO_PLACES, default="BEHIND", update=video_place_changed,
@@ -2094,6 +2267,8 @@ class SGM_PT_mh_rig(bpy.types.Panel):
             coll = rig.data.collections_all.get(name)
             if coll is not None:
                 grid.prop(coll, "is_visible", text=name, toggle=True)
+        if face_board(rig) is not None:
+            box.prop(s, "live_face", icon="USER")
 
         box = layout.box()
         box.label(text="Cleanup")
@@ -2123,6 +2298,10 @@ class SGM_PT_mh_rig(bpy.types.Panel):
                      invert_checkbox=True, icon="HIDE_ON" if video.hide_viewport else "HIDE_OFF")
             if "sgm_video_start" in video.keys():
                 row.prop(video, '["sgm_video_start"]', text="Starts at")
+            if "sgm_video_in" in video.keys():
+                row = box.row(align=True)
+                row.label(text=f"Video frames {video['sgm_video_in']}-{video['sgm_video_out']}")
+                row.operator("sgm.mh_save_trimmed_video", text="Save Trimmed Video", icon="SEQUENCE")
 
         box = layout.box()
         box.label(text="Finish")
@@ -2136,6 +2315,7 @@ class SGM_PT_mh_rig(bpy.types.Panel):
 CLASSES = (SGM_MHRigSettings, SGM_OT_mh_match, SGM_OT_mh_switch_all, SGM_OT_mh_copy_pose, SGM_OT_mh_paste_mirrored,
            SGM_OT_mh_mirror_side, SGM_OT_mh_trim_start, SGM_OT_mh_trim_end, SGM_OT_mh_rest_hand,
            SGM_OT_mh_rename_take, SGM_OT_mh_pose_magic, SGM_OT_mh_import_video, SGM_OT_mh_remove_video,
+           SGM_OT_mh_save_trimmed_video,
            SGM_OT_mh_fix_flips, SGM_OT_mh_bake_layers, SGM_OT_mh_export_fbx, SGM_OT_mh_set_neutral, SGM_OT_mh_render,
            SGM_OT_clear_console, SGM_PT_mh_rig)
 
@@ -2150,9 +2330,13 @@ def register():
                 pass
         bpy.utils.register_class(cls)
     bpy.types.Scene.sgm_mh_rig = bpy.props.PointerProperty(type=SGM_MHRigSettings)
+    add_live_face_handlers()
 
 
 def unregister():
+    for handlers in (bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.frame_change_post):
+        for fn in [f for f in handlers if getattr(f, "__name__", "") == "sgm_live_face"]:
+            handlers.remove(fn)
     for cls in reversed(CLASSES):
         try:
             bpy.utils.unregister_class(cls)

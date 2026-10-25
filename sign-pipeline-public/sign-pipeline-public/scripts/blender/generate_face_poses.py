@@ -15,18 +15,22 @@ import time
 #
 # The poses are recipes (POSES below): face board controls and how far each is moved, 0 to 1 of its range ("*" = both
 # sides, L and R; a 2D control such as C_jaw takes (sideways, up/down)). A control this face board hasn't is listed
-# and left out. Edit, add or remove recipes freely and run again; OVERWRITE = True redoes poses saved before.
+# and left out. Edit, add or remove recipes freely and run again: every pose is made again (OVERWRITE).
 
 # --- settings (None = from pipeline_config.json in the workspace) ---
 OUTPUT_FOLDER = None        # None = <Storage>/Face_Poses
 LIBRARY_NAME = "Face_Poses"
 PREFIX = "Face"             # pose names: "<PREFIX> <name>", e.g. "Face Yes-No Question"
-OVERWRITE = False
+OVERWRITE = True            # True = make every pose again (they are made from the recipes below, so nothing is lost);
+                            #   False = leave the poses already in the library as they are
 STRENGTH = 1.0              # every amount below is multiplied by this
 THUMBNAILS = True           # a picture of the face for each pose (drawn by the 3D Viewport; see convert_poses_to_metahuman.py's
                             #   THUMBNAIL_SHADING / THUMBNAIL_SIZE, which are used for it)
 FACE_VIEW = "FRONT"         # the thumbnail camera: "FRONT", or the face's "LEFT" / "RIGHT" side
 AUTHOR = "Studio Galt Mocap"
+CHECK_FACE = True           # first move the face board and look whether the face follows (RigLogic, from the Character
+                            #   DNA add-on). If it doesn't, the thumbnails would all show the same face: stop and say why
+DNA_ADDON_MODULES = ("character_dna_pro", "character_dna")
 
 # name -> {control (after "CTRL_"): amount}. Alternatives for controls that differ between face boards: "a|b".
 POSES = {
@@ -152,6 +156,110 @@ def set_pose(board, recipe):
     return missing
 
 
+_evaluator = {}
+
+
+def riglogic_ops():
+    """The Character DNA add-on's 'evaluate now' operators (force_evaluate), as (namespace, name)."""
+    found = []
+    for space in DNA_ADDON_MODULES:
+        ops = getattr(bpy.ops, space, None)
+        for name in (dir(ops) if ops else []):
+            if "force_evaluate" in name.lower() or name.lower() in ("evaluate", "evaluate_rig_logic", "evaluate_riglogic"):
+                found.append((space, name))
+    return found
+
+
+def update_face(board, heads):
+    """Let RigLogic move the face from the face board now: the scene updated, and the Character DNA add-on asked to
+    evaluate (its force_evaluate), with the face board - else the head's rig - active, whichever it accepts."""
+    scene, layer = bpy.context.scene, bpy.context.view_layer
+    layer.update()
+    scene.frame_set(scene.frame_current)
+    if _evaluator.get("failed"):
+        return
+    window = next(iter(bpy.context.window_manager.windows), None) if bpy.context.window_manager else None
+    area = next((a for a in window.screen.areas if a.type == "VIEW_3D"), None) if window else None
+    region = next((r for r in area.regions if r.type == "WINDOW"), None) if area else None
+    chosen = _evaluator.get("how")
+    tries = [chosen] if chosen else [(space, name, target) for space, name in riglogic_ops()
+                                     for target in [board] + list(heads) + [None]]
+    for space, name, target in tries:
+        op = getattr(getattr(bpy.ops, space), name)
+        override = {k: v for k, v in (("window", window), ("area", area), ("region", region)) if v is not None}
+        if target is not None:
+            override.update(active_object=target, object=target, selected_objects=[target])
+        try:
+            with bpy.context.temp_override(**override):
+                if not op.poll():
+                    continue
+                if "FINISHED" in op():
+                    _evaluator["how"] = (space, name, target)
+                    layer.update()
+                    return
+        except Exception:
+            continue
+    _evaluator["failed"] = True
+
+
+def face_vertices(meshes):
+    """The face meshes' vertices as the face shows them now (deformed by joints and shape keys), as one array."""
+    import numpy as np
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    chunks = []
+    for obj in meshes:
+        ev = obj.evaluated_get(depsgraph)
+        mesh = ev.to_mesh()
+        try:
+            co = np.empty(len(mesh.vertices) * 3, dtype=np.float64)
+            mesh.vertices.foreach_get("co", co)
+        finally:
+            ev.to_mesh_clear()
+        chunks.append(co)
+    return np.concatenate(chunks) if chunks else np.zeros(0)
+
+
+def check_face(rig, board, magic):
+    """Does the face follow the face board? (True/False, lines saying what was found)."""
+    import numpy as np
+    scene, layer = bpy.context.scene, bpy.context.view_layer
+    meshes = [o for o in magic.face_meshes(rig) if o.type == "MESH"]
+    lines = []
+    heads = [o for o in scene.objects if o.type == "ARMATURE" and any(b.name.startswith("FACIAL_") for b in o.data.bones)]
+    for obj in meshes:
+        keys = obj.data.shape_keys
+        owners = sorted({m.object.name for m in obj.modifiers if m.type == "ARMATURE" and m.object} |
+                        ({obj.parent.name} if obj.parent else set()))
+        lines.append(f"    face mesh '{obj.name}': {len(keys.key_blocks) - 1 if keys else 0} shape keys, moved by "
+                     f"{', '.join(owners) or 'nothing'}")
+    lines.append(f"    face skeletons (FACIAL_ bones): {', '.join(o.name for o in heads) or 'none'}")
+    enabled = [a.module for a in bpy.context.preferences.addons]
+    addon = next((m for m in enabled for w in DNA_ADDON_MODULES if m == w or m.endswith("." + w)), None)
+    lines.append(f"    Character DNA add-on: {addon or 'NOT ENABLED'}")
+    for space in DNA_ADDON_MODULES:
+        ops = getattr(bpy.ops, space, None)
+        names = [n for n in dir(ops) if any(w in n.lower() for w in ("eval", "rig_logic", "riglogic"))] if ops else []
+        if names:
+            lines.append(f"    its RigLogic operators: {', '.join(f'{space}.{n}' for n in names)}")
+    if not meshes:
+        return False, lines
+    set_pose(board, {})
+    update_face(board, heads)
+    before = face_vertices(meshes)
+    set_pose(board, {"C_jaw": (0.0, 1.0), "*_mouth_cornerPull": 1.0, "*_brow_raiseIn": 1.0, "*_eye_blink": 1.0})
+    update_face(board, heads)
+    after = face_vertices(meshes)
+    set_pose(board, {})
+    update_face(board, heads)
+    how = _evaluator.get("how")
+    lines.append("    RigLogic asked to evaluate with " + (f"{how[0]}.{how[1]}" + (f" ('{how[2].name}' active)" if how[2] else "")
+                                                         if how else "nothing (no add-on operator accepted)"))
+    moved = float(np.abs(after - before).max()) if len(before) == len(after) and len(before) else 0.0
+    lines.insert(0, f"    the jaw opened, a smile, brows up and eyes closed on the face board moved the face by "
+                    f"{moved:.4f} at most")
+    return moved > 1e-4, lines
+
+
 def generate():
     started = time.perf_counter()
     print("[generate_face_poses]")
@@ -179,6 +287,29 @@ def generate():
     if ad:
         ad.action = None                            # so the board holds the pose we set, not its animation
     old_pose = {pb.name: pb.matrix_basis.copy() for pb in board.pose.bones}
+    if CHECK_FACE and THUMBNAILS:
+        try:
+            follows, lines = check_face(rig, board, magic)
+        finally:
+            for name, basis in old_pose.items():
+                board.pose.bones[name].matrix_basis = basis
+        print("  does the face follow the face board?")
+        for line in lines:
+            print(line)
+        if not follows:
+            if ad:
+                ad.action = old_action
+            raise RuntimeError(
+                "The face doesn't follow the face board, so every thumbnail would show the same face (nothing was "
+                "saved). The face board only moves the face through RigLogic, which the Character DNA add-on runs on "
+                "the DNA head: the console lists what this file has. Either the head isn't the DNA head (a face "
+                "moved only by MH_face_skeleton is the FBX face: export the head DNA with export_metahuman.py and "
+                "run build_metahuman_rig.py again with the add-on enabled), or the add-on's RigLogic isn't running on "
+                "it (its panel in the sidebar, N: turn on evaluating the bones / shape keys, or its auto evaluate). "
+                "To make the poses anyway, without thumbnails: THUMBNAILS = False")
+        print("    yes")
+    face_heads = [o for o in scene.objects if o.type == "ARMATURE" and o is not board
+                  and any(b.name.startswith("FACIAL_") for b in o.data.bones)]
     keep = set(magic.face_meshes(rig)) | set(magic.character_objects(rig))
     keep -= set(board.children_recursive)           # the board's own frame and labels stay out of the picture
     hidden, camera, made, skipped, missing_all = [], None, 0, 0, {}
@@ -198,8 +329,7 @@ def generate():
             missing = set_pose(board, recipe)
             for key in missing:
                 missing_all.setdefault(key, []).append(name)
-            layer.update()
-            scene.frame_set(scene.frame_current)    # RigLogic follows the board
+            update_face(board, face_heads)          # RigLogic moves the face from the board
             action = magic.pose_action(board, controls, pose_name)
             action.asset_mark()
             action.asset_data.author = AUTHOR
@@ -233,6 +363,9 @@ def generate():
             ad.action = old_action
         scene.frame_set(scene.frame_current)
     note = conv.add_library(LIBRARY_NAME, folder) if made else ""
+    if skipped and not made:
+        print(f"  Nothing was made: all {skipped} poses are in {folder} already, and OVERWRITE is False. Set "
+              "OVERWRITE = True at the top of this script to make them again.")
     print(f"Made {made} face pose(s) in {time.perf_counter() - started:.1f} s"
           + (f"; {skipped} were there already (OVERWRITE = True makes them again)" if skipped else "") + ".")
     if missing_all:

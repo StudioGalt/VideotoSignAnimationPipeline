@@ -62,7 +62,7 @@ Every Blender script below is run from the **Scripting** workspace: **Text ▸ O
 4. **Procedural fixes.** Open the take's `.blend`, run `metahuman_procedural_fixes.py`, and press **OK** in its dialog. It sets up the animation layers, eases the take out of and back into the neutral pose, holds the hips and legs still (**Leg Pin**), switches arms and legs to IK, and saves `<take> Working.blend`.
 5. **Clean up by hand** in `<take> Working.blend`, with the **Metahuman Rig** tab:
    - **Import Video** puts the take's video behind the character, playing in step with the timeline, to compare against.
-   - **Trim Start / Trim End** cut the take; **Rest Hand** holds one hand still for one-handed signs.
+   - **Trim Start / Trim End** cut the take, and the reference video with it; **Save Trimmed Video** (Video box) writes the cut video as `<video> Trimmed.mp4`. **Rest Hand** holds one hand still for one-handed signs.
    - Poses from the Asset Browser (libraries `Body_Poses_Basic` and `Body_Poses_Advanced`) apply to the rig; **Match IK to FK** puts the IK controls on them.
    - **Fix Flips** if a finger or limb spins round in a frame or two.
    - **Rename File** saves the take under its archive name: `<Product> <Language> <Name> <Date> Unedited.blend`, in a folder of that name.
