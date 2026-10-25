@@ -1,0 +1,91 @@
+{
+  "config_version": 2,
+  "project_name": "Sign Pipeline",
+  "paths": {
+    "scripts": "Scripts",
+    "video_source": "Videos/Labelled",
+    "video_unlabelled": "Videos/Unlabelled",
+    "video_holding": "Videos/Holding",
+    "capture_media": "Capture Media",
+    "unreal_exports": "Unreal Exports",
+    "metahuman_export": "MetaHuman Export",
+    "metahuman": "MetaHuman",
+    "character_blend": "MetaHuman/MetaHuman_character.blend",
+    "neutral_pose": "MetaHuman/neutral_pose.json",
+    "reference_template": "MetaHuman/Xsens_reference.fbx",
+    "takes": ".",
+    "avatar": "AvatarFolder",
+    "reference_rigs": "Reference Rigs",
+    "storage": "Storage",
+    "ready_for_upload": "Ready for Upload",
+    "logs": "Logs",
+    "scripts_blender": "Scripts",
+    "scripts_unreal": "Scripts",
+    "scripts_common": "Scripts",
+    "blender_clips": "."
+  },
+  "unreal": {
+    "project": "",
+    "wip_folder": "/Game/WIP",
+    "completed_folder": "/Game/Completed",
+    "character_folder": "/Game/MetaHumans",
+    "metahuman_blueprint": "",
+    "identity": "",
+    "identities": {},
+    "output_path": "/Game/PCap",
+    "body_tracking": true,
+    "required_plugins": [
+      "MetaHuman",
+      "MetaHumanBodyTracker",
+      "MetaHumanCalibrationProcessing",
+      "MetaHumanCharacter",
+      "MetaHumanCoreTech",
+      "MetaHumanDepthProcessing",
+      "MetaHumanGenerator",
+      "MetaHumanLiveLink",
+      "ModelingToolsEditorMode",
+      "PerformanceCaptureCore",
+      "PerformanceCaptureToolkit",
+      "PerformanceCaptureWorkflow"
+    ]
+  },
+  "video": {
+    "action": "move",
+    "extra_folders": [],
+    "slate_drop_words": []
+  },
+  "blender": {
+    "body_rig": "GaltisMH_control_rig",
+    "face_rig": "GaltisMH_face_gui",
+    "face_armature_data": "face_gui",
+    "required_addons": [
+      [
+        "Animation Layers",
+        "Animation_Layers"
+      ],
+      [
+        "Rigify",
+        "rigify"
+      ],
+      [
+        "Character Control Rig",
+        "bl_ext.polyhammer.character_control_rig"
+      ]
+    ],
+    "defaults": {
+      "ease_in": 30,
+      "ease_out": 30,
+      "leg_pin": 20,
+      "plant_feet": true,
+      "match_poles": true,
+      "face": true,
+      "face_ease_in": 30,
+      "face_ease_out": 30
+    }
+  },
+  "tools": {
+    "blender_exe": "",
+    "unreal_editor": "",
+    "live_link_hub": ""
+  }
+}

@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Backups made by create_workspace.py and Blender
+*.bak
+*.blend1
+*.blend2
+
+# Personal settings if a project is set up inside the repo folder
+/pipeline_config.json
+
+# Pose packs (pack_pose_library.py): shared as files of a GitHub Release, not kept in the repo
+* poses.zip
