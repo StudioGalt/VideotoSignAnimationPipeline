@@ -18,7 +18,7 @@ from mathutils import Euler, Quaternion
 #MetaHuman rig's controls, and the take is saved as OUTPUT_ROOT\<take>\<take>.blend for the procedural
 #edits (metahuman_procedural_fixes.py). (Run in an avatar file with Galtis-style control bones instead, it
 #retargets straight onto that rig.)
-VERSION = "2026-10-26"   # printed first, so the console shows which copy of this script ran
+VERSION = "2026-10-27b"   # printed first, so the console shows which copy of this script ran
 # --- config ---
 # Settings left as None come from pipeline_config.json in the workspace (create_workspace.py makes it).
 OUTPUT_ROOT = None   # each finished take goes to OUTPUT_ROOT\<take name>\. None = paths.takes (the workspace folder)
@@ -1494,7 +1494,31 @@ def file_take(name, export_dir, video):
 
 
 # --- run ---
+def pause_live_face():
+    """Turn the Metahuman Rig tab's Live Face off while the take is worked on: it asks RigLogic to move the face on
+    every frame change, and the import steps through every frame many times (that is what made it slow). Returns a
+    function that turns it back on (as it was)."""
+    settings = getattr(bpy.context.scene, "sgm_mh_rig", None)
+    if settings is None or not getattr(settings, "live_face", False):
+        return lambda: None
+    settings.live_face = False
+    print("  Live Face paused for the import")
+
+    def resume():
+        if not settings.live_face:
+            settings.live_face = True
+    return resume
+
+
 def main(chosen=None):
+    resume_live_face = pause_live_face()
+    try:
+        _main(chosen, resume_live_face)
+    finally:
+        resume_live_face()
+
+
+def _main(chosen, resume_live_face):
     """Import one take. chosen: the folder of the take picked from the list; "" = none picked (settings already
     read); None = read the settings first (main() on its own)."""
     if chosen is None:
@@ -1609,8 +1633,10 @@ def main(chosen=None):
     new_actions = [a for a in bpy.data.actions if a not in before]
 
     if new_actions:
+        resume_live_face()                           # saved with Live Face as it was
         file_take(name, take_folder, video)
     elif bpy.data.filepath:
+        resume_live_face()
         bpy.ops.wm.save_mainfile()
         print(f"[saved] {bpy.data.filepath}")
 
@@ -1648,13 +1674,39 @@ class SGM_OT_import_unreal_take_choose(bpy.types.Operator):
         index = int(self.take) if str(self.take).isdigit() else -1
         if not 0 <= index < len(_take_folders):
             return {"CANCELLED"}
-        try:
-            main(chosen=_take_folders[index])
-        except Exception as err:
-            traceback.print_exc()
-            self.report({"ERROR"}, f"import_unreal_take: {err}")
-            return {"CANCELLED"}
+        folder = _take_folders[index]
+        print(f"  picked: {os.path.basename(folder)}")
+        # The import runs once the list has closed, in the window's own context: run from the list itself, the
+        # importers and mode switches see the list's small popup region instead of a 3D Viewport, and refuse
+        bpy.app.timers.register(lambda: run_picked(folder), first_interval=0.1)
         return {"FINISHED"}
+
+
+def run_picked(folder):
+    """Import the take picked from the list, in a 3D Viewport's context (as when the script runs from the Text Editor)."""
+    wm = bpy.context.window_manager
+    window = next(iter(wm.windows), None) if wm else None
+    areas = list(window.screen.areas) if window else []
+    area = next((a for a in areas if a.type == "VIEW_3D"), None) or next(iter(areas), None)
+    region = next((r for r in area.regions if r.type == "WINDOW"), None) if area else None
+    override = {k: v for k, v in (("window", window), ("screen", window.screen if window else None),
+                                  ("area", area), ("region", region)) if v is not None}
+    try:
+        with bpy.context.temp_override(**override):
+            main(chosen=folder)
+    except Exception as err:
+        traceback.print_exc()
+        message = f"{type(err).__name__}: {err}"
+
+        def draw(self, context):
+            for line in [message[i:i + 110] for i in range(0, len(message), 110)][:6]:
+                self.layout.label(text=line)
+        if wm is not None and len(wm.windows) and not bpy.app.background:
+            try:
+                wm.popup_menu(draw, title="import_unreal_take stopped (the console has the details)", icon="ERROR")
+            except Exception:
+                pass
+    return None
 
 
 _take_folders = []

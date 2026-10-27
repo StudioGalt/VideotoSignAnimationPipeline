@@ -498,10 +498,10 @@ def setup_layers(rig):
     """Base_Layer (muted copy source), Subtractive_Layer (REPLACE), Correction_Layer. As in the Galtis script."""
     bpy.context.view_layer.objects.active = rig
     rig.select_set(True)
-    rig.als.turn_on = True
+    bpy.context.object.als.turn_on = True             # through the active object, as the add-on's own button does
     if not len(rig.Anim_Layers):                     # the add-on makes its first layer when it is turned on; nudge it
-        rig.als.turn_on = False
-        rig.als.turn_on = True
+        bpy.context.object.als.turn_on = False
+        bpy.context.object.als.turn_on = True
     if not len(rig.Anim_Layers):
         raise RuntimeError("Animation Layers didn't turn on for '" + rig.name + "' (" + layers_state(rig) + "). In the "
                            "Animation Layers panel (sidebar, N, Animation tab), turn on Animation Layers for the rig by "
@@ -590,7 +590,7 @@ def face_fixes(face, ease_in, ease_out):
     face.select_set(True)
     bpy.context.view_layer.objects.active = face
     if USE_ANIMATION_LAYERS:
-        face.als.turn_on = True
+        bpy.context.object.als.turn_on = True      # the face board is the active object here
     bpy.ops.object.mode_set(mode="POSE")
     if USE_ANIMATION_LAYERS:
         if len(face.Anim_Layers) == 0:
@@ -671,7 +671,8 @@ def key_rest_frame0(rig):
 
 # --- the fixes ---
 def run_procedural_fixes(ease_in=30, ease_out=30, leg_pin=30, plant_feet=False, match_poles=True,
-                         ik_arms=True, ik_legs=True, face=True, face_ease_in=30, face_ease_out=30, smooth_legs=0):
+                         ik_arms=True, ik_legs=True, face=True, face_ease_in=30, face_ease_out=30, smooth_legs=0,
+                         resume=None):
     _TIMINGS.clear()
     _stage("Setup")
     rig = find_rig()
@@ -683,6 +684,8 @@ def run_procedural_fixes(ease_in=30, ease_out=30, leg_pin=30, plant_feet=False, 
     rig.hide_set(False)
     rig.select_set(True)
     bpy.context.view_layer.objects.active = rig
+    if USE_ANIMATION_LAYERS:
+        bpy.context.object.als.turn_on = True          # Animation Layers on for the rig before anything else
     for coll in rig.data.collections_all:
         coll.is_solo = False
         coll.is_visible = coll.name not in ("Deform", "MCH")
@@ -862,6 +865,8 @@ def run_procedural_fixes(ease_in=30, ease_out=30, leg_pin=30, plant_feet=False, 
                  f"Smooth Legs {smooth_legs}, "
                  f"IK arms {ik_arms}, IK legs {ik_legs}, "
                  f"plant feet {plant_feet}, match poles {match_poles}\n")
+    if resume is not None:
+        resume()                                       # Live Face back on before the file is saved
     if SAVE_WORKING and bpy.data.filepath:
         path = os.path.join(folder, f"{stamp} Working.blend")
         bpy.ops.wm.save_as_mainfile(filepath=path, relative_remap=False)
@@ -949,10 +954,20 @@ class SGM_OT_metahuman_procedural_fixes(bpy.types.Operator):
             self.report({"ERROR"}, f"Ease In + Ease Out ({self.ease_in + self.ease_out}) doesn't fit in frames "
                                    f"{scene.frame_start}-{scene.frame_end}")
             return {"CANCELLED"}
-        total = run_procedural_fixes(self.ease_in, self.ease_out, self.leg_pin if self.pin_legs else 0,
-                                     self.plant_feet, self.match_poles,
-                                     self.ik_arms, self.ik_legs, self.face, self.face_ease_in, self.face_ease_out,
-                                     self.smooth_legs)
+        settings = getattr(scene, "sgm_mh_rig", None)
+        live = bool(getattr(settings, "live_face", False))
+        if live:
+            settings.live_face = False                 # RigLogic on every frame change would make the fixes crawl
+            print("  Live Face paused for the procedural fixes")
+        try:
+            total = run_procedural_fixes(self.ease_in, self.ease_out, self.leg_pin if self.pin_legs else 0,
+                                         self.plant_feet, self.match_poles,
+                                         self.ik_arms, self.ik_legs, self.face, self.face_ease_in, self.face_ease_out,
+                                         self.smooth_legs, resume=(lambda: setattr(settings, "live_face", True)) if live
+                                         else None)
+        finally:
+            if live and not settings.live_face:
+                settings.live_face = True
         self.report({"INFO"}, f"Procedural fixes done in {total:.1f} s")
         return {"FINISHED"}
 

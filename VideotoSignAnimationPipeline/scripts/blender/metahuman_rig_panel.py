@@ -1675,7 +1675,13 @@ class SGM_OT_mh_bake_layers(bpy.types.Operator):
         scene = context.scene
         frames = list(range(bake_start(objects, scene), scene.frame_end + 1))
         stamp = take_stamp()
-        done = bake_layers(objects, frames, lambda o: f"{stamp} {'Baked' if o is rig else 'Face Baked'}")
+        settings = context.scene.sgm_mh_rig
+        live = settings.live_face
+        settings.live_face = False                     # RigLogic on every baked frame would make the bake crawl
+        try:
+            done = bake_layers(objects, frames, lambda o: f"{stamp} {'Baked' if o is rig else 'Face Baked'}")
+        finally:
+            settings.live_face = live
         lines = [f"'{o.name}': {n} channels into '{a.name}'" for o, a, n in done]
         print(f"[bake layers] frames {frames[0]}-{frames[-1]}: " + "; ".join(lines))
         framelog(f"Bake Layers: frames {frames[0]}-{frames[-1]}; " + "; ".join(lines))
