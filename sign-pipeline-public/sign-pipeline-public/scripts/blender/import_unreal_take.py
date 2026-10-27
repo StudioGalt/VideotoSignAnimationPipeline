@@ -11,13 +11,14 @@ from mathutils import Euler, Quaternion
 #    EXPORT_ROOT\<take folder>\<video>.mp4                        (the take's source video, moved in from Labelled by
 #                                                                 export_animations.py; else it is searched for by name)
 #The take name is the folder name. Each run handles one take and moves its files out of
-#EXPORT_ROOT, so running again picks up the next take.
+#EXPORT_ROOT. With more than one take waiting there, a list of them opens (type to search it) to pick the one to
+#import (CHOOSE_TAKE); running again lists the ones still to do.
 #
 #Run it in the MetaHuman character file (made by build_metahuman_rig.py): the body is keyed onto the
 #MetaHuman rig's controls, and the take is saved as OUTPUT_ROOT\<take>\<take>.blend for the procedural
 #edits (metahuman_procedural_fixes.py). (Run in an avatar file with Galtis-style control bones instead, it
 #retargets straight onto that rig.)
-VERSION = "2026-10-24"   # printed first, so the console shows which copy of this script ran
+VERSION = "2026-10-26"   # printed first, so the console shows which copy of this script ran
 # --- config ---
 # Settings left as None come from pipeline_config.json in the workspace (create_workspace.py makes it).
 OUTPUT_ROOT = None   # each finished take goes to OUTPUT_ROOT\<take name>\. None = paths.takes (the workspace folder)
@@ -110,6 +111,8 @@ FACE_SHAPE_MAP = {
     "MouthSlideLeft":             ["mouthLeft"],
     "MouthSlideRight":            ["mouthRight"],
 }
+CHOOSE_TAKE = True    # more than one take waiting in EXPORT_ROOT: a list of them (type to search) to pick from;
+                      # False = the first one (and in a background run, always the first)
 REDO_TAKE = ""        # a take that was already imported and filed, e.g. "Hello_tk1": its exported files and its video are
                       # moved back from OUTPUT_ROOT to its export folder first, then it is imported again
 RETARGET = True       # after the body comes in as a plain skeleton: key the avatar's control bones so its body follows
@@ -494,8 +497,9 @@ def redo_take(name):
         print(f"  redo: moved back {f}")
 
 
-def resolve_take():
-    """REDO_TAKE if set; else the take named like the open .blend, if it has an Export folder; else the first one."""
+def resolve_take(chosen=None):
+    """REDO_TAKE if set; else the take picked from the list (its folder, `chosen`); else the take named like the open
+    .blend, if it has an Export folder; else the first one."""
     if not os.path.isdir(EXPORT_ROOT):
         raise RuntimeError(f"Export folder not found: {EXPORT_ROOT}")
     if REDO_TAKE:
@@ -518,6 +522,11 @@ def resolve_take():
         print("  workspace's settings - run create_workspace.py again, then export_animations.py from the workspace's Scripts.")
         raise RuntimeError(f"No take folders with a *_body.fbx in {EXPORT_ROOT}: run export_animations.py in Unreal first "
                            "(the console lists what is in the folder)")
+    if chosen:
+        for take in takes:
+            if os.path.normcase(take[1]) == os.path.normcase(chosen):
+                return take
+        raise RuntimeError(f"The take picked ({chosen}) isn't in {EXPORT_ROOT} any more")
     blend = bpy.data.filepath
     name = os.path.splitext(os.path.basename(blend))[0] if blend else None
     for wanted in (REDO_TAKE, name):
@@ -1485,11 +1494,14 @@ def file_take(name, export_dir, video):
 
 
 # --- run ---
-def main():
-    print(f"[import_unreal_take] version {VERSION}")
-    resolve_settings()
+def main(chosen=None):
+    """Import one take. chosen: the folder of the take picked from the list; "" = none picked (settings already
+    read); None = read the settings first (main() on its own)."""
+    if chosen is None:
+        print(f"[import_unreal_take] version {VERSION}")
+        resolve_settings()
     check_dna_addon()
-    name, take_folder = resolve_take()
+    name, take_folder = resolve_take(chosen)
     print(f"[take] {name}   ({take_folder})")
 
     # find the video BEFORE importing, so a missing video doesn't leave a half-done file
@@ -1603,5 +1615,70 @@ def main():
         print(f"[saved] {bpy.data.filepath}")
 
 
+# --- picking the take ---
+_take_items = []
+
+
+def take_items(self, context):
+    return _take_items
+
+
+def describe_take(folder):
+    files = os.listdir(folder)
+    parts = [label for label, ok in (("body", any(f.lower().endswith("_body.fbx") for f in files)),
+                                     ("face", any(f.lower().endswith(("_face.fbx", "_face_board.json")) for f in files)),
+                                     ("video", any(f.lower().endswith(VIDEO_EXTS) for f in files))) if ok]
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(folder)))
+    return f"{', '.join(parts)} - exported {when}"
+
+
+class SGM_OT_import_unreal_take_choose(bpy.types.Operator):
+    """Pick the take to import from the ones waiting in the Unreal Exports folder"""
+    bl_idname = "sgm.import_unreal_take_choose"
+    bl_label = "Import which take?"
+    bl_property = "take"
+
+    take: bpy.props.EnumProperty(name="Take", items=take_items)
+
+    def invoke(self, context, event):
+        context.window_manager.invoke_search_popup(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        index = int(self.take) if str(self.take).isdigit() else -1
+        if not 0 <= index < len(_take_folders):
+            return {"CANCELLED"}
+        try:
+            main(chosen=_take_folders[index])
+        except Exception as err:
+            traceback.print_exc()
+            self.report({"ERROR"}, f"import_unreal_take: {err}")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+_take_folders = []
+
+
+def start():
+    """The take to import: picked from a list when several are waiting (CHOOSE_TAKE), else straight on."""
+    print(f"[import_unreal_take] version {VERSION}")
+    resolve_settings()
+    if CHOOSE_TAKE and not REDO_TAKE and not bpy.app.background and os.path.isdir(EXPORT_ROOT):
+        takes = sorted(list_takes(), key=lambda take: take[0].lower())
+        if len(takes) > 1:
+            _take_folders[:] = [folder for _name, folder in takes]
+            _take_items[:] = [(str(i), name, describe_take(folder)) for i, (name, folder) in enumerate(takes)]
+            try:
+                bpy.utils.unregister_class(bpy.types.SGM_OT_import_unreal_take_choose)
+            except (AttributeError, RuntimeError):
+                pass
+            bpy.utils.register_class(SGM_OT_import_unreal_take_choose)
+            print(f"  {len(takes)} takes waiting in {EXPORT_ROOT}: pick one in the list (type to search it)")
+            bpy.ops.sgm.import_unreal_take_choose("INVOKE_DEFAULT")
+            return
+    main(chosen="")                                  # "" = no take picked (the first one), settings already read
+
+
 if __name__ == "__main__":
-    main()
+    start()

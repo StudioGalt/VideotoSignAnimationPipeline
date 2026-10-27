@@ -167,6 +167,23 @@ def layers_addon_installed():
     return None
 
 
+def enable_layers_addon():
+    """Turn the Animation Layers add-on on when it is installed but off. Returns its module name, or None."""
+    installed = layers_addon_installed()
+    if installed is None:
+        return None
+    try:
+        import addon_utils
+        addon_utils.enable(installed, default_set=True, persistent=True)
+    except Exception as err:
+        print(f"  Animation Layers: couldn't enable {installed}: {err}")
+        return None
+    if animation_layers_on():
+        print(f"  Animation Layers: the add-on ({installed}) was off; enabled it")
+        return installed
+    return None
+
+
 def warn_layers_missing():
     """The Animation Layers add-on isn't on: say so in the console and in a popup (the fixes then don't run)."""
     installed = layers_addon_installed()
@@ -471,9 +488,26 @@ def snap_ik_to_fk(rig, chosen, frames, match_poles=True):
 
 
 # --- layers ---
+def layers_state(rig):
+    ad = rig.animation_data
+    return (f"turn_on={getattr(rig.als, 'turn_on', '?')}, layers={[l.name for l in getattr(rig, 'Anim_Layers', [])]}, "
+            f"NLA tracks={[t.name for t in ad.nla_tracks] if ad else []}, action={ad.action.name if ad and ad.action else None}")
+
+
 def setup_layers(rig):
     """Base_Layer (muted copy source), Subtractive_Layer (REPLACE), Correction_Layer. As in the Galtis script."""
+    bpy.context.view_layer.objects.active = rig
+    rig.select_set(True)
     rig.als.turn_on = True
+    if not len(rig.Anim_Layers):                     # the add-on makes its first layer when it is turned on; nudge it
+        rig.als.turn_on = False
+        rig.als.turn_on = True
+    if not len(rig.Anim_Layers):
+        raise RuntimeError("Animation Layers didn't turn on for '" + rig.name + "' (" + layers_state(rig) + "). In the "
+                           "Animation Layers panel (sidebar, N, Animation tab), turn on Animation Layers for the rig by "
+                           "hand once and run this again; if that doesn't work, the add-on's version may not match "
+                           "this Blender")
+    print(f"✅ Animation Layers on for '{rig.name}'")
     bpy.ops.object.mode_set(mode="POSE")
     bpy.ops.anim.add_anim_layer()
     bpy.ops.anim.remove_anim_layer()
@@ -488,6 +522,9 @@ def setup_layers(rig):
     rig.Anim_Layers[1].name = "Subtractive_Layer"
     bpy.ops.anim.add_anim_layer()
     rig.Anim_Layers[2].name = "Correction_Layer"
+    wanted = {"Base_Layer", "Subtractive_Layer", "Correction_Layer"}
+    if not wanted <= {l.name for l in rig.Anim_Layers}:
+        raise RuntimeError("The animation layers weren't made as expected (" + layers_state(rig) + ")")
 
 
 def add_layer(rig, name):
@@ -843,10 +880,10 @@ class SGM_OT_metahuman_procedural_fixes(bpy.types.Operator):
                                    description="Correction-layer anchor this many frames after the start")
     ease_out: bpy.props.IntProperty(name="Ease Out", default=DEFAULTS["ease_out"], min=1,
                                     description="Correction-layer anchor this many frames before the end")
-    pin_legs: bpy.props.BoolProperty(name="Leg Pin", default=DEFAULTS["pin_legs"],
+    pin_legs: bpy.props.BoolProperty(name="Leg Pin", default=DEFAULTS["pin_legs"], options={"SKIP_SAVE"},
                                      description="Key the hips and legs to their frame-1 pose (off = keep the captured "
                                                  "hips and legs)")
-    leg_pin: bpy.props.IntProperty(name="Every N Frames", default=DEFAULTS["leg_pin"], min=1,
+    leg_pin: bpy.props.IntProperty(name="Every N Frames", default=DEFAULTS["leg_pin"], min=1, options={"SKIP_SAVE"},
                                    description="Key the frame-1 legs and hips every this many frames "
                                                "(1 = every frame: hips and legs hold their frame-1 pose)")
     smooth_legs: bpy.props.IntProperty(name="Smooth Legs", default=DEFAULTS["smooth_legs"], min=0, max=30,
@@ -863,6 +900,8 @@ class SGM_OT_metahuman_procedural_fixes(bpy.types.Operator):
     face_ease_out: bpy.props.IntProperty(name="Face Ease Out", default=DEFAULTS["face_ease_out"], min=1)
 
     def check_ready(self, context):
+        if USE_ANIMATION_LAYERS and not animation_layers_on():
+            enable_layers_addon()                         # installed but off: turn it on
         if USE_ANIMATION_LAYERS and not animation_layers_on():
             warn_layers_missing()
             self.report({"ERROR"}, "Enable the Animation Layers add-on first (Edit > Preferences > Add-ons)")
