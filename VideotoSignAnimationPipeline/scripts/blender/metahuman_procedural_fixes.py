@@ -490,27 +490,66 @@ def snap_ik_to_fk(rig, chosen, frames, match_poles=True):
 # --- layers ---
 def layers_state(rig):
     ad = rig.animation_data
+    slot = getattr(ad, "action_slot", None) if ad else None
     return (f"turn_on={getattr(rig.als, 'turn_on', '?')}, layers={[l.name for l in getattr(rig, 'Anim_Layers', [])]}, "
-            f"NLA tracks={[t.name for t in ad.nla_tracks] if ad else []}, action={ad.action.name if ad and ad.action else None}")
+            f"NLA tracks={[t.name for t in ad.nla_tracks] if ad else []}, action={ad.action.name if ad and ad.action else None}, "
+            f"slot={getattr(slot, 'identifier', None)}")
+
+
+def layers_addon_version():
+    """'Animation Layers 2.1.9.6' (from the add-on's bl_info), or '' when it can't be read."""
+    module = layers_addon_installed()
+    if module is None:
+        return ""
+    try:
+        import addon_utils, sys
+        info = addon_utils.module_bl_info(sys.modules[module])
+        return f"{info.get('name', module)} {'.'.join(str(v) for v in info.get('version', ()))}"
+    except Exception:
+        return module
+
+
+def turn_layers_on(rig):
+    """Animation Layers on for the rig, with its base layer holding the take's action.
+
+    Ticking turn_on only switches the add-on on for the object: Animation Layers 2.x builds the base layer
+    (the rig's action moved onto an NLA track) when the first layer is added. So, as the Galtis script did:
+    turn on, add a layer, then take the extra one back off (when the add made a base layer and a new one)."""
+    ad = rig.animation_data
+    take_action = ad.action if ad else None
+    view_layer = bpy.context.view_layer
+    view_layer.objects.active = rig
+    rig.select_set(True)
+    als = bpy.context.object.als if bpy.context.object is rig else rig.als   # as the add-on's own button does
+    als.turn_on = True
+    if rig.mode != "POSE":
+        bpy.ops.object.mode_set(mode="POSE")
+    bpy.ops.anim.add_anim_layer()
+    if len(rig.Anim_Layers) >= 2:
+        bpy.ops.anim.remove_anim_layer()
+    view_layer.update()
+    version = layers_addon_version() or "the Animation Layers add-on"
+    if not len(rig.Anim_Layers):
+        print(f"\n  Animation Layers made no layer on '{rig.name}' ({layers_state(rig)}); "
+              f"{version} on Blender {bpy.app.version_string}")
+        raise RuntimeError(
+            f"Animation Layers made no layer on '{rig.name}' ({version}, Blender {bpy.app.version_string}), even "
+            "after adding one. Check the System Console (Window > Toggle System Console) for an error from the "
+            "add-on, and try Add Layer by hand in its panel (sidebar N, Animation tab).")
+    ad = rig.animation_data
+    held = {s.action for t in (ad.nla_tracks if ad else []) for s in t.strips if s.action}
+    if take_action is not None and take_action not in held and not (ad and ad.action is take_action):
+        print(f"\n  The base layer doesn't hold the take ({layers_state(rig)})")
+        raise RuntimeError(
+            f"Animation Layers made its layers on '{rig.name}', but the take's action ({take_action.name}) isn't in "
+            f"any of them, so the fixes would run on an empty layer. Nothing past this point was done. Reopen the take's "
+            ".blend (without saving this one) and check the layers in the Animation Layers panel.")
+    print(f"✅ Animation Layers on for '{rig.name}': {[l.name for l in rig.Anim_Layers]} ({version})")
 
 
 def setup_layers(rig):
     """Base_Layer (muted copy source), Subtractive_Layer (REPLACE), Correction_Layer. As in the Galtis script."""
-    bpy.context.view_layer.objects.active = rig
-    rig.select_set(True)
-    bpy.context.object.als.turn_on = True             # through the active object, as the add-on's own button does
-    if not len(rig.Anim_Layers):                     # the add-on makes its first layer when it is turned on; nudge it
-        bpy.context.object.als.turn_on = False
-        bpy.context.object.als.turn_on = True
-    if not len(rig.Anim_Layers):
-        raise RuntimeError("Animation Layers didn't turn on for '" + rig.name + "' (" + layers_state(rig) + "). In the "
-                           "Animation Layers panel (sidebar, N, Animation tab), turn on Animation Layers for the rig by "
-                           "hand once and run this again; if that doesn't work, the add-on's version may not match "
-                           "this Blender")
-    print(f"✅ Animation Layers on for '{rig.name}'")
-    bpy.ops.object.mode_set(mode="POSE")
-    bpy.ops.anim.add_anim_layer()
-    bpy.ops.anim.remove_anim_layer()
+    turn_layers_on(rig)
     rig.als.layer_index = 0
     rig.Anim_Layers[0].name = "Base_Layer"
     bpy.ops.anim.duplicate_anim_layer()
