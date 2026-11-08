@@ -23,7 +23,7 @@ python create_workspace.py "D:/Sign Workspace" --yes
 
 You should see the folders it made, `Settings: D:\Sign Workspace\pipeline_config.json`, how many scripts were copied into `Scripts`, and the next steps. The workspace is where everything happens from now on: the scripts are run from its `Scripts` folder, and they find their settings by themselves.
 
-If you have the pose libraries (`Body_Poses_Basic poses.zip` and `Body_Poses_Advanced poses.zip`, from the Releases page), put them next to `create_workspace.py` and run the command again: the poses go into `Storage\Body_Poses_Basic` and `Storage\Body_Poses_Advanced`.
+If you want the pose libraries (`Body_Poses_Basic poses.zip`, `Body_Poses_Advanced poses.zip` and `Face_Poses poses.zip`, from the [Releases](https://github.com/StudioGalt/VideotoSignAnimationPipeline/releases) page), put them next to `create_workspace.py` and run the command again: the poses go into `Storage\Body_Poses_Basic`, `Storage\Body_Poses_Advanced` and `Storage\Face_Poses`.
 
 ---
 
