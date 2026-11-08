@@ -40,13 +40,14 @@ from mathutils import Quaternion
 #elbow-target nudge and the rotation clear on the IK arm bones (the matched elbow targets replace both),
 #and the shape key renaming (done later, on the avatar the take is put on).
 
+
 # --- config ---
 RIG_NAME = "MH_rig"         # "" = the armature made by build_metahuman_rig.py
 NEUTRAL_POSE_FILE = None    # None = paths.neutral_pose in pipeline_config.json (<workspace>/MetaHuman/neutral_pose.json)
 FACE_RIG = ""               # face board armature; "" = the one in this file (*_face_gui, *_face_board, or CTRL_ bones)
 USE_ANIMATION_LAYERS = True  # False = key straight into the rig's action (no layers; for testing without the add-on)
 SAVE_WORKING = True         # save as "<take> Working.blend" at the end
-DEFAULTS = {"ease_in": 30, "ease_out": 30, "pin_legs": True, "leg_pin": 1, "smooth_legs": 4, "plant_feet": False, "match_poles": True,
+DEFAULTS = {"ease_in": 30, "ease_out": 30, "pin_legs": True, "leg_pin": 1, "smooth_legs": 4, "plant_feet": True, "match_poles": True,
             "ik_arms": True, "ik_legs": True, "face": True, "face_ease_in": 30, "face_ease_out": 30}
 
 TORSO = ["chest_1", "chest_2", "chest_3", "chest_4", "chest_5", "neckfk_01", "neckfk", "headfk"]
@@ -509,6 +510,24 @@ def layers_addon_version():
         return module
 
 
+def switch_layers_on(rig):
+    """Animation Layers on for the rig, the way it's done by hand: the rig made the active object, then
+    bpy.context.object.als.turn_on = True. Returns True when the rig's turn_on reads True afterwards."""
+    current = bpy.context.object
+    if current is not None and current is not rig and current.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")         # leave another object's edit / pose mode before switching
+    rig.hide_set(False)
+    rig.select_set(True)
+    bpy.context.view_layer.objects.active = rig
+    if bpy.context.object is not rig:
+        print(f"  ⚠️ the active object is '{getattr(bpy.context.object, 'name', None)}', not '{rig.name}': "
+              "Animation Layers may be switched on for the wrong object")
+    bpy.context.object.als.turn_on = True
+    on = bool(rig.als.turn_on)
+    print(f"  Animation Layers turn_on for '{rig.name}': {on}")
+    return on
+
+
 def turn_layers_on(rig):
     """Animation Layers on for the rig, with its base layer holding the take's action.
 
@@ -518,10 +537,9 @@ def turn_layers_on(rig):
     ad = rig.animation_data
     take_action = ad.action if ad else None
     view_layer = bpy.context.view_layer
-    view_layer.objects.active = rig
-    rig.select_set(True)
-    als = bpy.context.object.als if bpy.context.object is rig else rig.als   # as the add-on's own button does
-    als.turn_on = True
+    if not switch_layers_on(rig):
+        raise RuntimeError(f"bpy.context.object.als.turn_on = True didn't switch Animation Layers on for '{rig.name}' "
+                           f"(the active object is '{getattr(bpy.context.object, 'name', None)}')")
     if rig.mode != "POSE":
         bpy.ops.object.mode_set(mode="POSE")
     bpy.ops.anim.add_anim_layer()
@@ -724,7 +742,7 @@ def run_procedural_fixes(ease_in=30, ease_out=30, leg_pin=30, plant_feet=False, 
     rig.select_set(True)
     bpy.context.view_layer.objects.active = rig
     if USE_ANIMATION_LAYERS:
-        bpy.context.object.als.turn_on = True          # Animation Layers on for the rig before anything else
+        switch_layers_on(rig)                          # Animation Layers on for the rig before anything else
     for coll in rig.data.collections_all:
         coll.is_solo = False
         coll.is_visible = coll.name not in ("Deform", "MCH")
@@ -1018,4 +1036,11 @@ except (AttributeError, RuntimeError):
 bpy.utils.register_class(SGM_OT_metahuman_procedural_fixes)
 
 if __name__ == "__main__":
+    # switch Animation Layers on here, from the script itself (the same as typing
+    # bpy.context.object.als.turn_on = True in the Python Console), before the dialog opens
+    if USE_ANIMATION_LAYERS and not animation_layers_on():
+        enable_layers_addon()
+    _rig = find_rig()
+    if USE_ANIMATION_LAYERS and animation_layers_on() and _rig is not None:
+        switch_layers_on(_rig)
     bpy.ops.sgm.metahuman_procedural_fixes("INVOKE_DEFAULT")

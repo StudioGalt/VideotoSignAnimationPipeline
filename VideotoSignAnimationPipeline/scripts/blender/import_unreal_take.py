@@ -18,7 +18,7 @@ from mathutils import Euler, Quaternion
 #MetaHuman rig's controls, and the take is saved as OUTPUT_ROOT\<take>\<take>.blend for the procedural
 #edits (metahuman_procedural_fixes.py). (Run in an avatar file with Galtis-style control bones instead, it
 #retargets straight onto that rig.)
-VERSION = "2026-10-27b"   # printed first, so the console shows which copy of this script ran
+VERSION = "2026-11-07a"   # printed first, so the console shows which copy of this script ran
 # --- config ---
 # Settings left as None come from pipeline_config.json in the workspace (create_workspace.py makes it).
 OUTPUT_ROOT = None   # each finished take goes to OUTPUT_ROOT\<take name>\. None = paths.takes (the workspace folder)
@@ -170,6 +170,9 @@ NAME_PREFIXES = ("AS_MHP_", "MHP_", "AS_", "A_")   # dropped from animation name
 TARGET_FPS  = 60
 VIDEO_EXTS  = (".mp4", ".mov")
 BAKE_POSES  = True    # re-key armatures on whole frames after the retime
+HIDE_IMPORTED = True  # at the end, hide what the import brought in (the plain skeleton and anything with it, the
+                      # stand-in face board) in the viewport and in renders, before the take is saved. The avatar
+                      # rig that was keyed stays visible. False = leave them showing
 
 
 # --- helpers ---
@@ -1493,6 +1496,24 @@ def file_take(name, export_dir, video):
     print(f"[filed] {take_dir}")
 
 
+def hide_imported(objects_before):
+    """Hide every object that wasn't in the file before the import (eye icon off, and left out of renders)."""
+    if not HIDE_IMPORTED:
+        return
+    layer = bpy.context.view_layer
+    hidden = []
+    for obj in bpy.data.objects:
+        if obj in objects_before:
+            continue
+        if obj.name in layer.objects:
+            obj.hide_set(True)
+        obj.hide_render = True
+        hidden.append(obj.name)
+    if hidden:
+        print(f"  hidden: {', '.join(hidden[:8])}" + (f" and {len(hidden) - 8} more" if len(hidden) > 8 else "")
+              + " (HIDE_IMPORTED = False leaves them showing)")
+
+
 # --- run ---
 def pause_live_face():
     """Turn the Metahuman Rig tab's Live Face off while the take is worked on: it asks RigLogic to move the face on
@@ -1631,6 +1652,7 @@ def _main(chosen, resume_live_face):
         elif standin:
             bpy.data.objects.remove(standin)
     new_actions = [a for a in bpy.data.actions if a not in before]
+    hide_imported(objects_before)                    # before saving, so the filed .blend opens with them hidden
 
     if new_actions:
         resume_live_face()                           # saved with Live Face as it was

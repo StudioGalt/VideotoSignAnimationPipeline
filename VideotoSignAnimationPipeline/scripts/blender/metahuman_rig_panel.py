@@ -885,6 +885,46 @@ def video_frame_at(obj, frame):
     return int(math.floor((frame - obj["sgm_video_start"]) * obj["sgm_video_rate"] + 0.5) + 1)
 
 
+def refresh_video(scene):
+    """Put the video's frame for the current timeline frame on the plane. Blender's own image playback doesn't always
+    reach an image empty (the plane then sits on one frame however the timeline moves), so the plane's Offset is set
+    here on every frame change, which also makes Blender work out the shown frame again. Same frame as the driver."""
+    obj = bpy.data.objects.get(VIDEO_OBJECT)
+    if obj is None or "sgm_video_start" not in obj.keys() or obj.name not in scene.objects:
+        return
+    if not isinstance(obj.data, bpy.types.Image):
+        return
+    user = obj.image_user
+    frame = scene.frame_current
+    first = int(obj.get("sgm_video_in", 1))
+    last = int(obj.get("sgm_video_out", obj.get("sgm_video_frames", 1)))
+    wanted = min(max(video_frame_at(obj, frame), first), last)
+    counted = min(max(frame - user.frame_start + 1, 0), user.frame_duration)   # what Blender adds the Offset to
+    user.frame_offset = wanted - counted           # setting it (even to the same value) refreshes the shown frame
+    obj.update_tag()
+
+
+@bpy.app.handlers.persistent
+def sgm_video_refresh(scene, depsgraph=None):
+    try:
+        refresh_video(scene)
+    except (ReferenceError, KeyError, TypeError, AttributeError, RuntimeError):
+        pass
+
+
+def add_video_handlers():
+    for handlers in (bpy.app.handlers.frame_change_post, bpy.app.handlers.load_post):
+        for fn in [f for f in handlers if getattr(f, "__name__", "") == "sgm_video_refresh"]:
+            handlers.remove(fn)
+    bpy.app.handlers.frame_change_post.append(sgm_video_refresh)
+
+
+def remove_video_handlers():
+    for handlers in (bpy.app.handlers.frame_change_post, bpy.app.handlers.load_post):
+        for fn in [f for f in handlers if getattr(f, "__name__", "") == "sgm_video_refresh"]:
+            handlers.remove(fn)
+
+
 def trim_video(start_cut=None, end_cut=None):
     """Cut the reference video with the take: Trim Start at `start_cut` (that frame becomes frame 0, so the video
     moves as many frames earlier and starts there), Trim End at `end_cut` (the video ends there). Returns a note."""
@@ -899,6 +939,7 @@ def trim_video(start_cut=None, end_cut=None):
     if end_cut is not None:
         obj["sgm_video_out"] = max(int(obj["sgm_video_in"]), min(int(obj["sgm_video_out"]), video_frame_at(obj, end_cut)))
     obj.update_tag()
+    refresh_video(bpy.context.scene)
     return f"; video cut to its frames {obj['sgm_video_in']}-{obj['sgm_video_out']}"
     for modifier in list(fcurve.modifiers):
         fcurve.modifiers.remove(modifier)
@@ -1012,6 +1053,8 @@ class SGM_OT_mh_import_video(bpy.types.Operator):
         obj["sgm_video_in"], obj["sgm_video_out"] = 1, int(frames)      # the whole video, until a trim cuts it
         obj["sgm_video_path"] = path
         set_video_driver(obj)
+        add_video_handlers()                    # the plane follows the timeline from now on
+        refresh_video(scene)
         context.view_layer.update()
 
         last = self.start_frame + round((frames - 1) / obj["sgm_video_rate"])
@@ -2337,9 +2380,11 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.sgm_mh_rig = bpy.props.PointerProperty(type=SGM_MHRigSettings)
     add_live_face_handlers()
+    add_video_handlers()
 
 
 def unregister():
+    remove_video_handlers()
     for handlers in (bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.frame_change_post):
         for fn in [f for f in handlers if getattr(f, "__name__", "") == "sgm_live_face"]:
             handlers.remove(fn)

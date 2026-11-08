@@ -7,7 +7,7 @@ from mathutils import Matrix, Vector
 # Reads what export_metahuman.py writes from Unreal into MH_EXPORT_FOLDER:
 #     <blueprint>_body.fbx    body mesh + skeleton
 #     <blueprint>_face.fbx    face mesh + facial joints
-# and saves the result as CHARACTER_BLEND. import_unreal_take.py is then run from that file: it
+# and saves the result as <blueprint>.blend in CHARACTER_BLEND's folder (NAME_FROM_METAHUMAN). import_unreal_take.py is then run from that file: it
 # keys each take onto this rig's controls and files the take as its own .blend.
 #
 # The control rig (one armature, RIG_NAME; the MetaHuman bones stay as they are and deform the mesh):
@@ -28,6 +28,8 @@ MH_EXPORT_FOLDER = None   # the export, or the folder above it: then unreal.meta
                           # most recently exported MetaHuman in it. None = paths.metahuman_export (<workspace>/MetaHuman Export)
 CHARACTER_BLEND = None    # saved here; "" = don't save. None = paths.character_blend
                           # (<workspace>/MetaHuman/MetaHuman_character.blend)
+NAME_FROM_METAHUMAN = True   # True = save as <MetaHuman name>.blend in CHARACTER_BLEND's folder (the name comes from
+                             # the export's <name>_body.fbx); False = save to CHARACTER_BLEND exactly as given
 BODY_SCALE = 100.0        # same as import_unreal_take.py, so the takes and the character are the same size
 RIG_NAME = "MH_rig"       # the body armature, with the controls
 FACE_SKELETON_NAME = "MH_face_skeleton"
@@ -297,6 +299,16 @@ def find_export(folder, part):
         return None
     hits = sorted(f for f in os.listdir(folder) if f.lower().endswith(f"_{part}.fbx"))
     return os.path.join(folder, hits[0]) if hits else None
+
+
+def metahuman_name(body_fbx, folder):
+    """The MetaHuman's name: <name> of <name>_body.fbx, else the export folder's name. Safe as a file name."""
+    name = ""
+    if body_fbx:
+        name = re.sub(r"_body\.fbx$", "", os.path.basename(body_fbx), flags=re.I)
+    if not name and folder:
+        name = os.path.basename(os.path.normpath(folder))
+    return re.sub(r'[<>:"/\\|?*]+', "_", name).strip(" .")
 
 
 def find_exports(folder, part):
@@ -869,6 +881,7 @@ if rig is None:
         raise RuntimeError(f"{os.path.basename(body_fbx)} has no skeleton with a 'pelvis' bone")
     rig = bodies[0]
     rig.name = rig.data.name = RIG_NAME
+    rig["sgm_metahuman"] = metahuman_name(body_fbx, folder)
     print(f"  body: '{rig.name}', {len(rig.data.bones)} bones, meshes: "
           + ", ".join(o.name for o in new if o.type == "MESH"))
 else:
@@ -876,6 +889,9 @@ else:
     clear_old(rig)
     folder = export_folder(MH_EXPORT_FOLDER)
     face_fbx = find_export(folder, "face")
+    if not rig.get("sgm_metahuman"):              # a file built before the name was kept on the rig
+        rig["sgm_metahuman"] = metahuman_name(find_export(folder, "body"), folder)
+print(f"  MetaHuman: {rig.get('sgm_metahuman') or '(name unknown)'}")
 
 
 def add_skeleton(path, name):
@@ -1043,6 +1059,11 @@ for obj in bpy.context.view_layer.objects:
     obj.select_set(False)
 rig.select_set(True)
 bpy.context.view_layer.objects.active = rig
+if CHARACTER_BLEND and NAME_FROM_METAHUMAN:
+    if rig.get("sgm_metahuman"):
+        CHARACTER_BLEND = os.path.join(os.path.dirname(CHARACTER_BLEND), rig["sgm_metahuman"] + ".blend")
+    else:
+        print(f"  the MetaHuman's name isn't known: saving as {os.path.basename(CHARACTER_BLEND)}")
 if CHARACTER_BLEND:
     os.makedirs(os.path.dirname(CHARACTER_BLEND), exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=CHARACTER_BLEND, relative_remap=False)
