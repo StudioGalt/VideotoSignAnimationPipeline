@@ -1,8 +1,8 @@
 # VideotoSignAnimationPipeline
 
 Setup Phase
-1.	Download git repo in desired folder
-2.	Unzip
+1.	Download git repo in desired folder (git clone, or Code > Download ZIP and unzip it)
+2.	Open a command prompt in that folder
 3.	Find “create_workspace.py” then run “python create_workspace.py "D:/Sign Workspace" --yes”
 4.	Create Unreal engine project
     a.	Recommended setting scaleable and third person
@@ -37,8 +37,10 @@ Unreal Phase
 2.  Run Ingest.py
     a.	Can take a while 18 minutes for 4
     b.	And sometime fails to get facial animation or body animation
-3.	Run export_metahuman.py
-4.	Run export_animations.py
+3.	Run Process.py
+    a.	Solves each take, several minutes each
+4.	Run export_metahuman.py
+5.	Run export_animations.py
 Blender/Cleanup Phase
 1.	In a new blender file delete default cube, run “build_metahuman_rig.py”
 2.	Run import_unreal_take.py
