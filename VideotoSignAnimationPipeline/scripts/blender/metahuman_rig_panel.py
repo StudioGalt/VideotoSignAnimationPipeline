@@ -1,5 +1,5 @@
 import bpy
-import datetime, math, json, os, re, shutil
+import datetime, math, json, os, re, shutil, threading
 from mathutils import Matrix, Vector
 
 # "Metahuman Rig" tab in the 3D Viewport sidebar (N-panel), for the rig made by build_metahuman_rig.py.
@@ -8,7 +8,9 @@ from mathutils import Matrix, Vector
 #     of the FK elbow / knee, so the IK limb takes the FK pose; then the limb can be switched to IK without a jump
 #   - Match FK to IK: the FK bones are turned to the IK pose; then the limb can be switched to FK without a jump
 #   - on the current frame, the scene's frame range, or a range you set; keyed or not
-#   - mirroring: Copy Pose / Paste Mirrored, and Left -> Right / Right -> Left. Blender's own "Paste Flipped"
+#   - mirroring: Copy Pose, then Paste (Local), Paste Mirrored (Local) or Paste Mirrored (Global); and
+#     Left -> Right / Right -> Left. Local keeps each bone's pose relative to its parent (a hand keeps its bend on
+#     the forearm, wherever the arm now is); Global keeps the copied angle in space. Blender's own "Paste Flipped"
 #     mirrors each bone's local rotation, which only works when the left and right bones have mirror-image axes;
 #     the MetaHuman's don't (Unreal sets up its right side differently). These mirror the pose itself, across
 #     the character's middle, whatever the bones' axes
@@ -140,7 +142,8 @@ def set_switch(rig, limb, value, key, frame):
 
 
 # --- mirroring ---
-_CLIPBOARD = {}      # bone name -> its pose as a change from rest, in armature space
+_CLIPBOARD = {}      # bone name -> {"global": its pose as a change from rest, in armature space,
+                     #               "local": its own transform relative to its parent (matrix_basis)}
 
 
 def flip_name(name):
@@ -202,6 +205,25 @@ def apply_deltas(rig, deltas, key):
     return done
 
 
+def mirrored_local(rig, name, basis, mirror):
+    """The local transform (matrix_basis) for `name`'s mirror twin that mirrors `basis` relative to the parent.
+    The change is carried into the armature's rest axes, reflected there, and carried into the twin's own axes,
+    so it works whatever the bones' axes (the MetaHuman's left and right bones aren't mirror images)."""
+    bones = rig.data.bones
+    twin = flip_name(name)
+    if name not in bones or twin not in bones:
+        return twin, None
+    ra = bones[name].matrix_local.to_3x3().normalized()
+    rb = bones[twin].matrix_local.to_3x3().normalized()
+    s3 = mirror.to_3x3()
+    turn = basis.to_3x3()                           # rotation and scale, in the bone's own axes
+    turn_b = rb.inverted() @ s3 @ ra @ turn @ ra.inverted() @ s3 @ rb
+    move = rb.inverted() @ (s3 @ (ra @ basis.translation))
+    m = turn_b.to_4x4()
+    m.translation = move
+    return twin, m
+
+
 def mirrored_deltas(rig, deltas):
     """{flipped name: mirrored change from rest}; a middle bone (no side) is mirrored onto itself."""
     s = mirror_matrix(rig)
@@ -222,7 +244,7 @@ def autokey(context):
 
 
 class SGM_OT_mh_copy_pose(bpy.types.Operator):
-    """Copy the pose of the selected bones (for Paste Mirrored)"""
+    """Copy the pose of the selected bones (for Paste and Paste Mirrored)"""
     bl_idname = "sgm.mh_copy_pose"
     bl_label = "Copy Pose"
 
@@ -237,8 +259,50 @@ class SGM_OT_mh_copy_pose(bpy.types.Operator):
             self.report({"ERROR"}, "Select the bones to copy (Pose Mode)")
             return {"CANCELLED"}
         _CLIPBOARD.clear()
-        _CLIPBOARD.update({pb.name: pose_delta(pb) for pb in bones})
+        _CLIPBOARD.update({pb.name: {"global": pose_delta(pb), "local": pb.matrix_basis.copy()} for pb in bones})
         self.report({"INFO"}, f"Copied {len(bones)} bones")
+        return {"FINISHED"}
+
+
+def apply_local(rig, bases, key):
+    """Set each bone's own transform (relative to its parent) from {name: matrix_basis}."""
+    frame = bpy.context.scene.frame_current
+    done = []
+    for name, basis in bases.items():
+        pb = rig.pose.bones.get(name)
+        if pb is None or basis is None:
+            continue
+        pb.matrix_basis = basis
+        if key:
+            for path in ("location", rotation_path(pb), "scale"):
+                pb.keyframe_insert(path, frame=frame, group=pb.name)
+        done.append(name)
+    bpy.context.view_layer.update()
+    return done
+
+
+def clipboard_part(part):
+    """{name: matrix} of one part of the clipboard (a clipboard from an older version holds the global part only)."""
+    return {n: (v.get(part) if isinstance(v, dict) else (v if part == "global" else None)) for n, v in _CLIPBOARD.items()}
+
+
+class SGM_OT_mh_paste_pose(bpy.types.Operator):
+    """Paste the copied pose onto the same bones, each relative to its parent (as Blender's own Paste)"""
+    bl_idname = "sgm.mh_paste_pose"
+    bl_label = "Paste (Local)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return find_rig(context) is not None and bool(_CLIPBOARD)
+
+    def execute(self, context):
+        rig = find_rig(context)
+        done = apply_local(rig, clipboard_part("local"), autokey(context))
+        if not done:
+            self.report({"ERROR"}, "Copy the pose again (the copy was made by an older version of this tab)")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Pasted {len(done)} bones" + (" and keyed" if autokey(context) else ""))
         return {"FINISHED"}
 
 
@@ -248,14 +312,37 @@ class SGM_OT_mh_paste_mirrored(bpy.types.Operator):
     bl_label = "Paste Mirrored"
     bl_options = {"REGISTER", "UNDO"}
 
+    space: bpy.props.EnumProperty(name="Space", default="LOCAL", items=[
+        ("LOCAL", "Local", "Each bone mirrored relative to its parent: a hand keeps its bend on the forearm, "
+                           "wherever the arm is now"),
+        ("GLOBAL", "Global", "Each bone mirrored in space, across the character's middle: it takes the mirror of "
+                             "the copied angle, whatever its parents are doing")])
+
+    @classmethod
+    def description(cls, context, props):
+        if props.space == "GLOBAL":
+            return ("Paste the copied pose mirrored, in space: left bones onto the right ones and back, middle bones "
+                    "mirrored in place; each bone takes the mirror of its copied angle whatever its parents do")
+        return ("Paste the copied pose mirrored, relative to each bone's parent: left bones onto the right ones and "
+                "back, middle bones mirrored in place; a hand keeps its bend on the forearm wherever the arm is now")
+
     @classmethod
     def poll(cls, context):
         return find_rig(context) is not None and bool(_CLIPBOARD)
 
     def execute(self, context):
         rig = find_rig(context)
-        done = apply_deltas(rig, mirrored_deltas(rig, _CLIPBOARD), autokey(context))
-        self.report({"INFO"}, f"Pasted {len(done)} bones mirrored" + (" and keyed" if autokey(context) else ""))
+        if self.space == "GLOBAL":
+            done = apply_deltas(rig, mirrored_deltas(rig, clipboard_part("global")), autokey(context))
+        else:
+            mirror = mirror_matrix(rig)
+            bases = dict(mirrored_local(rig, n, b, mirror) for n, b in clipboard_part("local").items() if b is not None)
+            done = apply_local(rig, bases, autokey(context))
+            if not done:
+                self.report({"ERROR"}, "Copy the pose again (the copy was made by an older version of this tab)")
+                return {"CANCELLED"}
+        self.report({"INFO"}, f"Pasted {len(done)} bones mirrored ({self.space.lower()})"
+                    + (" and keyed" if autokey(context) else ""))
         return {"FINISHED"}
 
 
@@ -906,6 +993,8 @@ def refresh_video(scene):
 
 @bpy.app.handlers.persistent
 def sgm_video_refresh(scene, depsgraph=None):
+    if _render["busy"] or not on_main_thread():
+        return
     try:
         refresh_video(scene)
     except (ReferenceError, KeyError, TypeError, AttributeError, RuntimeError):
@@ -1998,26 +2087,75 @@ ENGINES = [("SCENE", "As set", "The render engine the scene is set to"),
            ("WORKBENCH", "Workbench", "Quickest: plain shading, as in the viewport's Solid mode")]
 
 
-def restore_range_after_render(scene, start, end):
-    """Put the scene's frame range back to start-end when the render finishes or is stopped."""
-    def restore(*_args):
-        for handlers in (bpy.app.handlers.render_complete, bpy.app.handlers.render_cancel):
-            while restore in handlers:
-                handlers.remove(restore)
+_render = {"busy": False}   # True while Blender renders a frame for the Render button: the handlers stay out
+
+
+def on_main_thread():
+    """Handlers run on Blender's render thread during a render started with Render Animation (Ctrl F12). Python
+    that changes the file or runs operators there, while the window is being drawn, crashes Blender."""
+    return threading.current_thread() is threading.main_thread()
+
+
+def set_file_format(settings, file_format):
+    if hasattr(settings, "media_type"):            # Blender 5: images and videos are chosen apart
+        settings.media_type = "VIDEO" if file_format == "FFMPEG" else "IMAGE"
+    settings.file_format = file_format
+
+
+def video_output(r, path):
+    set_file_format(r.image_settings, "FFMPEG")
+    r.ffmpeg.format, r.ffmpeg.codec = "MPEG4", "H264"
+    r.ffmpeg.constant_rate_factor = "HIGH"
+    r.ffmpeg.audio_codec = "NONE"
+    r.use_file_extension = True
+    r.filepath = path
+
+
+def render_result():
+    return next((i for i in bpy.data.images if i.type == "RENDER_RESULT"), None)
+
+
+def encode_video(scene, files, path, width, height):
+    """Join the frame images into an MP4, with the Video Sequencer in a scene of its own (removed after)."""
+    temp = bpy.data.scenes.new("SGM Render Encode")
+    try:
+        r = temp.render
+        r.resolution_x, r.resolution_y, r.resolution_percentage = width, height, 100
+        r.pixel_aspect_x, r.pixel_aspect_y = scene.render.pixel_aspect_x, scene.render.pixel_aspect_y
+        r.fps, r.fps_base = scene.render.fps, scene.render.fps_base
+        r.use_sequencer, r.use_compositing = True, False
+        temp.frame_start, temp.frame_end = 1, len(files)
+        # the frames already carry the scene's colour look: pass them through unchanged
+        for owner, attr, value in ((temp.display_settings, "display_device", scene.display_settings.display_device),
+                                   (temp.view_settings, "view_transform", "Standard"),
+                                   (temp.view_settings, "look", "None"),
+                                   (temp.view_settings, "exposure", 0.0), (temp.view_settings, "gamma", 1.0),
+                                   (temp.sequencer_colorspace_settings, "name", "sRGB")):
+            try:
+                setattr(owner, attr, value)
+            except (TypeError, AttributeError, ValueError):
+                pass
+        editor = temp.sequence_editor_create()
+        strips = editor.strips if hasattr(editor, "strips") else editor.sequences
         try:
-            if (scene.frame_start, scene.frame_end) != (start, end):
-                scene.frame_start, scene.frame_end = start, end
-                print(f"[render] the scene's frame range is {start}-{end} again")
-        except ReferenceError:
-            pass
-    bpy.app.handlers.render_complete.append(restore)
-    bpy.app.handlers.render_cancel.append(restore)
-    return restore
+            strip = strips.new_image(name="Render", filepath=files[0], channel=1, frame_start=1)
+        except TypeError:
+            strip = strips.new_image("Render", files[0], 1, 1)
+        for f in files[1:]:
+            strip.elements.append(os.path.basename(f))
+        video_output(r, path)
+        _render["busy"] = True
+        try:
+            bpy.ops.render.render(animation=True, scene=temp.name)
+        finally:
+            _render["busy"] = False
+    finally:
+        bpy.data.scenes.remove(temp)
 
 
 class SGM_OT_mh_render(bpy.types.Operator):
     """Render the scene's frame range, or a range you set, to an MP4 next to the .blend ('<take> Render.mp4'), through
-    the scene camera or a camera framed on the character. Blender's render window shows it going (Esc stops it)"""
+    the scene camera or a camera framed on the character. The status bar shows it going (Esc stops it)"""
     bl_idname = "sgm.mh_render"
     bl_label = "Render"
     bl_options = {"REGISTER"}
@@ -2119,29 +2257,108 @@ class SGM_OT_mh_render(bpy.types.Operator):
             return {"CANCELLED"}
         r = scene.render
         r.resolution_percentage = self.percentage
-        settings = r.image_settings
-        if hasattr(settings, "media_type"):        # Blender 5: images and videos are chosen apart
-            settings.media_type = "VIDEO"
-        settings.file_format = "FFMPEG"
-        r.ffmpeg.format, r.ffmpeg.codec = "MPEG4", "H264"
-        r.ffmpeg.constant_rate_factor = "HIGH"
-        r.ffmpeg.audio_codec = "NONE"
-        r.use_file_extension = True
-        r.filepath = os.path.join(folder, self.file_name(scene))
-        print(f"[render] {r.filepath}: frames {start}-{end}, camera '{scene.camera.name}', {r.engine}")
-        framelog(f"Render: {os.path.basename(r.filepath)}, frames {start}-{end}")
-        restore = None
-        if (start, end) != (scene.frame_start, scene.frame_end):
-            restore = restore_range_after_render(scene, scene.frame_start, scene.frame_end)
-            scene.frame_start, scene.frame_end = start, end     # put back when the render finishes or is stopped
+        self.scene = scene
+        self.path = os.path.join(folder, self.file_name(scene))
+        self.frames_dir = os.path.splitext(self.path)[0] + " frames"
+        if os.path.isdir(self.frames_dir):
+            shutil.rmtree(self.frames_dir, ignore_errors=True)
+        os.makedirs(self.frames_dir, exist_ok=True)
+        self.size = (r.resolution_x * r.resolution_percentage // 100, r.resolution_y * r.resolution_percentage // 100)
+        self.todo, self.files, self.total = list(range(start, end + 1)), [], end - start + 1
+        self.keep_frame = scene.frame_current
+        set_file_format(r.image_settings, "PNG")
+        r.image_settings.color_mode = "RGB"
+        print(f"[render] {self.path}: frames {start}-{end}, camera '{scene.camera.name}', {r.engine}")
+        framelog(f"Render: {os.path.basename(self.path)}, frames {start}-{end}")
+        if context.window is None:                 # no window (blender -b): render them all now
+            try:
+                while self.todo:
+                    self.render_frame(self.todo.pop(0))
+            finally:
+                scene.frame_set(self.keep_frame)
+            return self.finish(context)
+        wm = context.window_manager
+        wm.progress_begin(0, self.total)
+        self.timer = wm.event_timer_add(0.01, window=context.window)
+        wm.modal_handler_add(self)
+        self.status(context, "")
+        return {"RUNNING_MODAL"}
+
+    # Each frame: the timeline goes to it here, on Blender's main thread, so Live Face (RigLogic) and the reference
+    # video follow it as they do when you play the take; then Blender renders that frame and it is saved as an
+    # image. Blender's own Render Animation would run them on its render thread instead, which crashes it.
+    def render_frame(self, frame):
+        scene = self.scene
+        scene.frame_set(frame)
+        sgm_live_face(scene)                       # the face for this frame (nothing to do if the handler did it)
+        _render["busy"] = True
         try:
-            bpy.ops.render.render("INVOKE_DEFAULT", animation=True)
-        except Exception:
-            if restore is not None:
-                restore()
-            raise
-        if restore is not None and not bpy.app.is_job_running("RENDER"):
-            restore()                                  # it rendered there and then (or didn't start)
+            bpy.ops.render.render()
+        finally:
+            _render["busy"] = False
+        image = render_result()
+        if image is None:
+            raise RuntimeError("Blender made no Render Result")
+        path = os.path.join(self.frames_dir, f"frame_{frame:05d}.png")
+        image.save_render(filepath=path, scene=scene)
+        self.files.append(path)
+
+    def status(self, context, text):
+        try:
+            context.workspace.status_text_set(text or f"Rendering {os.path.basename(self.path)}: frame "
+                                              f"{len(self.files) + 1} of {self.total} (Esc stops)")
+        except (AttributeError, TypeError):
+            pass
+
+    def modal(self, context, event):
+        if event.type == "ESC" and event.value == "PRESS":
+            self.wrap_up(context)
+            shutil.rmtree(self.frames_dir, ignore_errors=True)
+            self.report({"WARNING"}, f"Render stopped after {len(self.files)} of {self.total} frames: no video written")
+            return {"CANCELLED"}
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        if self.todo:
+            try:
+                self.render_frame(self.todo.pop(0))
+            except Exception as err:
+                self.wrap_up(context)
+                self.report({"ERROR"}, f"Render failed on frame {self.scene.frame_current}: {err}")
+                return {"CANCELLED"}
+            context.window_manager.progress_update(len(self.files))
+            print(f"[render] frame {self.scene.frame_current} ({len(self.files)}/{self.total})")
+            self.status(context, "" if self.todo else "Rendering: writing the video ...")
+            return {"RUNNING_MODAL"}
+        self.wrap_up(context)
+        return self.finish(context)
+
+    def wrap_up(self, context):
+        """Stop the timer and progress, and put the timeline back on the frame it was on."""
+        wm = context.window_manager
+        if getattr(self, "timer", None) is not None:
+            wm.event_timer_remove(self.timer)
+            self.timer = None
+            wm.progress_end()
+        try:
+            context.workspace.status_text_set(None)
+        except (AttributeError, TypeError):
+            pass
+        self.scene.frame_set(self.keep_frame)
+
+    def finish(self, context):
+        r = self.scene.render
+        video_output(r, self.path)                 # the scene's output is the take's video, as before
+        if not self.files:
+            self.report({"ERROR"}, "No frames were rendered")
+            return {"CANCELLED"}
+        try:
+            encode_video(self.scene, self.files, self.path, *self.size)
+        except Exception as err:
+            self.report({"ERROR"}, f"The frames are in '{self.frames_dir}', but the video couldn't be made: {err}")
+            return {"CANCELLED"}
+        shutil.rmtree(self.frames_dir, ignore_errors=True)
+        print(f"[render] wrote {self.path}")
+        self.report({"INFO"}, f"Rendered {len(self.files)} frames to {os.path.basename(self.path)}")
         return {"FINISHED"}
 
 
@@ -2182,7 +2399,7 @@ def evaluate_face(board):
 
 @bpy.app.handlers.persistent
 def sgm_live_face(scene, depsgraph=None):
-    if _live["busy"]:
+    if _live["busy"] or _render["busy"] or not on_main_thread():
         return
     settings = getattr(scene, "sgm_mh_rig", None)
     if settings is None or not settings.live_face:
@@ -2301,7 +2518,10 @@ class SGM_PT_mh_rig(bpy.types.Panel):
         box.label(text="Mirror")
         row = box.row(align=True)
         row.operator("sgm.mh_copy_pose", text="Copy Pose", icon="COPYDOWN")
-        row.operator("sgm.mh_paste_mirrored", text="Paste Mirrored", icon="PASTEFLIPDOWN")
+        row.operator("sgm.mh_paste_pose", text="Paste (Local)", icon="PASTEDOWN")
+        row = box.row(align=True)
+        row.operator("sgm.mh_paste_mirrored", text="Mirrored (Local)", icon="PASTEFLIPDOWN").space = "LOCAL"
+        row.operator("sgm.mh_paste_mirrored", text="Mirrored (Global)", icon="PASTEFLIPDOWN").space = "GLOBAL"
         row = box.row(align=True)
         row.operator("sgm.mh_mirror_side", text="Left \u2192 Right").source = "L"
         row.operator("sgm.mh_mirror_side", text="Right \u2192 Left").source = "R"
@@ -2361,7 +2581,8 @@ class SGM_PT_mh_rig(bpy.types.Panel):
 
 
 
-CLASSES = (SGM_MHRigSettings, SGM_OT_mh_match, SGM_OT_mh_switch_all, SGM_OT_mh_copy_pose, SGM_OT_mh_paste_mirrored,
+CLASSES = (SGM_MHRigSettings, SGM_OT_mh_match, SGM_OT_mh_switch_all, SGM_OT_mh_copy_pose, SGM_OT_mh_paste_pose,
+           SGM_OT_mh_paste_mirrored,
            SGM_OT_mh_mirror_side, SGM_OT_mh_trim_start, SGM_OT_mh_trim_end, SGM_OT_mh_rest_hand,
            SGM_OT_mh_rename_take, SGM_OT_mh_pose_magic, SGM_OT_mh_import_video, SGM_OT_mh_remove_video,
            SGM_OT_mh_save_trimmed_video,
