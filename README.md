@@ -26,7 +26,7 @@ Every path and name that changes from one setup to another lives in one settings
 | Python | 3.8 or newer, only to run `create_workspace.py` (nothing to install) |
 | Unreal Engine | 5.8 with the MetaHuman plugins and the **Performance Capture Toolkit** (Fab) |
 | Blender | 5.x (developed on 5.1 and 5.2) |
-| Blender add-ons | **Animation Layers** (by Tal); the **Character DNA** add-on (Pro or standard; optional, for a face that runs RigLogic) |
+| Blender add-ons | **Animation Layers** (by Tal); the **Character DNA** add-on (Pro or staandard; optional, for a face that runs RigLogic) |
 
 ---
 
