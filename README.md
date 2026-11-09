@@ -17,6 +17,14 @@ Every path and name that changes from one setup to another lives in one settings
 
 [![Part 1 – Setup](https://img.youtube.com/vi/agC8LtTmPd8/hqdefault.jpg)](https://youtu.be/agC8LtTmPd8)
 
+**Part 2 – Unreal Engine**: sourcing and labelling videos, solving them with `Ingest.py`, and exporting the animations and the MetaHuman for Blender.
+
+[![Part 2 – Unreal Engine](https://img.youtube.com/vi/MTeCo7yV1t4/hqdefault.jpg)](https://www.youtube.com/watch?v=MTeCo7yV1t4)
+
+**Part 3 – Blender**: building the MetaHuman rig, importing a take, procedural fixes, trimming and cleanup, the pose library, Bake Layers, export and Pose Magic.
+
+[![Part 3 – Blender](https://img.youtube.com/vi/x5XReAU_au8/hqdefault.jpg)](https://youtu.be/x5XReAU_au8)
+
 ---
 
 ## Requirements
